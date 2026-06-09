@@ -1,0 +1,43 @@
+# Orion 工作区安全配置
+# 将此文件复制到 .orion/workspace.yaml 并根据需要修改
+
+# 禁止写入的文件 (相对于工作区)
+blocked_files:
+  - "Cargo.toml"
+  - "Cargo.lock"
+  - ".env"
+  - ".env.local"
+  - "*.pem"
+  - "*.key"
+
+# 禁止写入的目录
+blocked_dirs:
+  - "target"
+  - ".git"
+  - "node_modules"
+  - ".orion"
+  - "vendor"
+  - "dist"
+
+# 禁止写入的文件扩展名
+blocked_extensions:
+  - "exe"
+  - "dll"
+  - "so"
+  - "dylib"
+  - "pdb"
+  - "bin"
+  - "o"
+  - "obj"
+
+# 额外忽略模式 (类似 .gitignore)
+ignore_patterns:
+  - "*.log"
+  - "*.tmp"
+  - "*.swp"
+  - ".DS_Store"
+  - "Thumbs.db"
+
+# 是否允许写入框架自身文件 (默认 false)
+# 警告: 开启此选项可能导致框架损坏
+allow_framework_write: false

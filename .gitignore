@@ -1,0 +1,39 @@
+/target
+.env
+.env.local
+*.db
+*.db-journal
+*.db-wal
+*.log
+audit.log
+audit.jsonl
+.orion/
+sessions/
+trash/
+providers.local.yaml
+*.pem
+*.key
+*.pdb
+
+# 无关项目
+snake_game/
+tetris_game/
+hello_world/
+hello
+hello.rs
+hello.pdb
+test.txt
+test_write.txt
+poem_143.txt
+audit_session.jsonl
+
+# 临时文件
+1
+a
+b
+启动claude时cc的tui弹出
+进入claude code后
+
+# 设计文档（可选保留）
+*.md
+!README.md

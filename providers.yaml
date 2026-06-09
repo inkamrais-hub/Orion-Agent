@@ -1,0 +1,166 @@
+# Orion Agent — 多 Provider 配置模板
+#
+# 使用方式:
+#   1. 复制此文件为 providers.local.yaml (不提交到 git)
+#   2. 填入你的 API Key
+#   3. 在 config.yaml 中引用: provider.preset: "deepseek"
+#
+# 或者直接设置环境变量:
+#   LLM_API_KEY=xxx LLM_MODEL=deepseek-v4-pro LLM_API_BASE=https://api.deepseek.com
+
+# ── 预设模板 ──────────────────────────────────────────────
+
+presets:
+  # DeepSeek (国产, 性价比最高)
+  deepseek:
+    api_base: "https://api.deepseek.com"
+    model: "deepseek-v4-pro"
+    thinking: "enabled"
+    reasoning_effort: "high"
+    max_tokens: 8192
+    temperature: 0.7
+    description: "DeepSeek V4 Pro — 旗舰模型, 思考模式"
+
+  deepseek-flash:
+    api_base: "https://api.deepseek.com"
+    model: "deepseek-v4-flash"
+    thinking: "enabled"
+    reasoning_effort: "high"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "DeepSeek V4 Flash — 快速模型"
+
+  # OpenAI
+  openai:
+    api_base: "https://api.openai.com"
+    model: "gpt-4.1"
+    thinking: "disabled"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "GPT-4.1 — OpenAI 旗舰"
+
+  openai-mini:
+    api_base: "https://api.openai.com"
+    model: "gpt-4.1-mini"
+    thinking: "disabled"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "GPT-4.1 Mini — 快速便宜"
+
+  # Anthropic Claude
+  claude:
+    api_base: "https://api.anthropic.com"
+    model: "claude-sonnet-4-20250514"
+    thinking: "disabled"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "Claude Sonnet 4 — 平衡性能"
+
+  claude-opus:
+    api_base: "https://api.anthropic.com"
+    model: "claude-opus-4-1-20250805"
+    thinking: "disabled"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "Claude Opus 4.1 — 最强推理"
+
+  # 阿里云 Qwen (兼容 OpenAI SDK)
+  qwen:
+    api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: "qwen3.6-plus"
+    thinking: "enabled"
+    reasoning_effort: "high"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "Qwen 3.6 Plus — 国产旗舰"
+
+  qwen-max:
+    api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: "qwen3.6-max"
+    thinking: "enabled"
+    reasoning_effort: "high"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "Qwen 3.6 Max — 最强版本"
+
+  # 智谱 GLM (兼容 OpenAI SDK)
+  glm:
+    api_base: "https://open.bigmodel.cn/api/paas/v4"
+    model: "glm-4-plus"
+    thinking: "disabled"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "GLM-4 Plus — 智谱旗舰"
+
+  glm-flash:
+    api_base: "https://open.bigmodel.cn/api/paas/v4"
+    model: "glm-4-flash-250414"
+    thinking: "disabled"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "GLM-4 Flash — 免费模型"
+
+  # 月之暗面 Kimi (兼容 OpenAI SDK)
+  kimi:
+    api_base: "https://api.moonshot.ai/v1"
+    model: "kimi-k2.6"
+    thinking: "enabled"
+    reasoning_effort: "high"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "Kimi K2.6 — 月之暗面旗舰"
+
+  # 字节豆包 (兼容 OpenAI SDK)
+  doubao:
+    api_base: "https://ark.cn-beijing.volces.com/api/v3"
+    model: "doubao-seed-1-6-250615"
+    thinking: "enabled"
+    reasoning_effort: "high"
+    max_tokens: 4096
+    temperature: 0.7
+    description: "豆包 Seed 1.6 — 字节旗舰"
+
+  # 本地 Ollama (兼容 OpenAI SDK)
+  ollama:
+    api_base: "http://localhost:11434/v1"
+    model: "qwen2.5:14b"
+    thinking: "disabled"
+    max_tokens: 2048
+    temperature: 0.7
+    description: "Ollama 本地模型"
+
+# ── 模型能力声明 ──────────────────────────────────────────
+
+capabilities:
+  # 支持思考模式的模型
+  thinking_models:
+    - "deepseek-v4-pro"
+    - "deepseek-v4-flash"
+    - "deepseek-r1"
+    - "qwen3.6-plus"
+    - "qwen3.6-max"
+    - "kimi-k2.6"
+    - "kimi-k2-thinking"
+    - "doubao-seed-1-6-thinking-250615"
+    - "glm-4.7"
+    - "glm-5"
+
+  # 支持并行工具调用的模型
+  parallel_tools_models:
+    - "gpt-4.1"
+    - "gpt-4.1-mini"
+    - "claude-sonnet-4-20250514"
+    - "claude-opus-4-1-20250805"
+    - "deepseek-v4-pro"
+    - "deepseek-v4-flash"
+    - "qwen3.6-plus"
+    - "qwen3.6-max"
+    - "glm-4-plus"
+    - "kimi-k2.6"
+
+  # 支持结构化输出的模型
+  structured_output_models:
+    - "gpt-4.1"
+    - "gpt-4.1-mini"
+    - "deepseek-v4-pro"
+    - "kimi-k2.6"
