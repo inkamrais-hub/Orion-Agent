@@ -37,3 +37,4 @@ b
 # 设计文档（可选保留）
 *.md
 !README.md
+!README_EN.md
