@@ -13,6 +13,8 @@ pub mod category;
 pub mod multi_shell;
 pub mod mcp_init;
 pub mod meta_tools;
+pub mod skeleton_tool;
+pub mod docker_executor;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -196,6 +198,7 @@ pub fn register_default_tools(tools: &mut registry::ToolRegistry) {
     tools.register(ask_user::AskUserTool);
     tools.register(glob_tool::GlobTool);
     tools.register(grep_tool::GrepTool);
+    tools.register(skeleton_tool::SkeletonTool);
 }
 
 /// 注册元工具（延迟装载模式专用）
@@ -341,6 +344,73 @@ impl Tool for BashTool {
             _ => {} // High 及以下继续执行
         }
 
+        // ── Docker 沙箱模式 ──────────────────────────────────
+        let config = crate::config::OrionConfig::load();
+        if config.docker.enabled {
+            use docker_executor::{DockerExecutor, DockerExecutorConfig};
+
+            // Docker 不可用时优雅降级到本地模式
+            if !DockerExecutor::is_available().await {
+                tracing::warn!("Docker enabled but not available, falling back to local execution");
+            } else {
+                let executor = DockerExecutor::new(DockerExecutorConfig {
+                    image: config.docker.image,
+                    workdir: config.docker.workdir,
+                    auto_pull: config.docker.auto_pull,
+                    network: config.docker.network,
+                    memory_limit: config.docker.memory_limit,
+                    cpu_limit: config.docker.cpu_limit,
+                });
+
+                return match executor.execute(cmd, timeout_secs).await {
+                    Ok(output) => {
+                        let mut result = String::new();
+                        if !output.stdout.is_empty() {
+                            result.push_str(&output.stdout);
+                        }
+                        if !output.stderr.is_empty() {
+                            if !result.is_empty() { result.push_str("\n--- stderr ---\n"); }
+                            result.push_str(&output.stderr);
+                        }
+
+                        // 截断过长输出
+                        if result.len() > BASH_MAX_OUTPUT_BYTES {
+                            let mut end = BASH_MAX_OUTPUT_BYTES;
+                            while end > 0 && !result.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            let truncated = &result[..end];
+                            result = format!("{}\n\n[Output truncated, showing {}/{} bytes. Use more specific commands to reduce output.]", truncated, end, result.len());
+                        }
+
+                        if risk == crate::core::r#loop::BashRisk::High {
+                            result = format!(
+                                "[WARNING] High-risk command detected. Executing in Docker sandbox.\n{}",
+                                result
+                            );
+                        }
+
+                        let risk_str = format!("{:?}", risk);
+                        Ok(ToolResult {
+                            content: result,
+                            is_error: output.exit_code != 0,
+                            metadata: Some(serde_json::json!({
+                                "exit_code": output.exit_code,
+                                "mode": "docker",
+                                "risk_level": risk_str,
+                            })),
+                        })
+                    }
+                    Err(e) => Ok(ToolResult {
+                        content: format!("Docker execution error: {}", e),
+                        is_error: true,
+                        metadata: Some(serde_json::json!({"mode": "docker"})),
+                    }),
+                };
+            }
+        }
+
+        // ── 本地执行模式 ─────────────────────────────────────
         // Windows 上用 PowerShell 处理 Unicode 路径
         // PowerShell 原生支持 Unicode，比 cmd 更可靠
         let cmd_owned: String;

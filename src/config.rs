@@ -29,6 +29,10 @@ pub struct OrionConfig {
     pub cli: CliConfig,
     pub gateway: GatewayConfig,
 
+    // ── Docker 沙箱 ──
+    #[serde(default)]
+    pub docker: DockerConfig,
+
     // ── MCP ──
     #[serde(default)]
     pub mcp_servers: Vec<crate::tools::mcp::McpServerConfig>,
@@ -45,6 +49,7 @@ impl Default for OrionConfig {
             audit: AuditConfig::default(),
             cli: CliConfig::default(),
             gateway: GatewayConfig::default(),
+            docker: DockerConfig::default(),
             mcp_servers: Vec::new(),
         }
     }
@@ -238,6 +243,34 @@ impl Default for GatewayConfig {
             api_port: 8080,
             max_agents: 10,
             session_dir: ".orion/sessions".into(),
+        }
+    }
+}
+
+/// Docker 沙箱配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerConfig {
+    pub enabled: bool,
+    pub image: String,
+    pub workdir: String,
+    pub auto_pull: bool,
+    /// 网络模式: "none", "host", "bridge"
+    pub network: String,
+    pub memory_limit: String,
+    pub cpu_limit: String,
+}
+
+impl Default for DockerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            image: "ubuntu:22.04".into(),
+            workdir: "/workspace".into(),
+            auto_pull: true,
+            network: "none".into(),
+            memory_limit: "512m".into(),
+            cpu_limit: "1".into(),
         }
     }
 }

@@ -444,6 +444,7 @@ fn register_tools_by_name(registry: &mut ToolRegistry, names: &[String]) {
             "ask_user" => registry.register(ask_user::AskUserTool),
             "glob" => registry.register(glob_tool::GlobTool),
             "grep" => registry.register(grep_tool::GrepTool),
+            "skeleton" => registry.register(skeleton_tool::SkeletonTool),
             other => {
                 tracing::warn!(tool = other, "Unknown tool name, skipped");
             }

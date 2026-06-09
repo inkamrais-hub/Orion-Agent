@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod skeleton;
 pub use engine::CodeIndex;
 
 use std::sync::LazyLock;
