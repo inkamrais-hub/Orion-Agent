@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 /// 模型配置 (用户在 config.yaml 中定义)
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
-    /// 模型名称 (如 "deepseek-chat", "claude-3-opus")
+    /// 模型名称 (如 "deepseek-chat", "qwen-plus")
     pub name: String,
-    /// Provider 类型 (如 "openai", "anthropic", "deepseek")
+    /// Provider 类型 (如 "openai-compat", "anthropic")
     pub provider: String,
     /// API 端点
     pub endpoint: String,

@@ -134,10 +134,10 @@ impl L1ToolCache {
 }
 
 // ============================================================
-//  缓存失效追踪 (参考 Claude Code 的 cache-break 向量)
+//  缓存失效追踪
 // ============================================================
 
-/// 缓存失效向量 (参考 Claude Code 的 14 个 cache-break 向量)
+/// 缓存失效向量
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CacheBreakVector {
     /// 系统提示变更

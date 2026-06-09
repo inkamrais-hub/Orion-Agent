@@ -16,7 +16,7 @@ use crate::tools::registry::ToolRegistry;
 //  循环事件 — 用于向调用方报告中间状态
 // ============================================================
 
-/// 循环事件类型 (参考 Claude Code QueryEvent 设计)
+/// 循环事件类型
 #[derive(Debug, Clone)]
 pub enum LoopEvent {
     /// AI 思考内容 (DeepSeek thinking mode)
@@ -57,7 +57,7 @@ pub fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// 工具人类可读标题 (参考 Claude Code tool_title)
+/// 工具人类可读标题
 pub fn tool_title(tool_name: &str, input: &serde_json::Value) -> String {
     match tool_name {
         "read" => format!("Read {}", input["path"].as_str().unwrap_or("?")),
@@ -78,7 +78,7 @@ pub fn tool_title(tool_name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// Bash 命令风险分级 (参考 Claude Code BashRiskLevel)
+/// Bash 命令风险分级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BashRisk {
     Safe,    // ls, cat, grep, echo, pwd

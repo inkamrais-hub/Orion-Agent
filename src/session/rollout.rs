@@ -1,6 +1,6 @@
 //! Rollout — JSONL 不可变事件流
 //!
-//! Codex 设计: JSONL 不可变追加 + SQLite 索引 (双轨)
+//! 设计: JSONL 不可变追加 + SQLite 索引 (双轨)
 //!
 //! 好处:
 //! - JSONL 保证数据不丢 (即使崩溃，已写入的还在)
