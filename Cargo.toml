@@ -42,14 +42,15 @@ base64 = "0.22"
 
 # Web UI API
 axum = { version = "0.7", optional = true }
+tower-http = { version = "0.5", features = ["fs"], optional = true }
 
 # Web Search
 web-search = { path = "../web" }
 
 [features]
-default = ["openai-compat", "dotenv"]
+default = ["openai-compat", "dotenv", "api"]
 openai-compat = ["dep:reqwest", "dep:futures"]
 dotenv = ["dep:dotenvy"]
 wasm = ["dep:wasmtime"]
 sled-storage = ["dep:sled"]
-api = ["dep:axum", "dep:futures"]
+api = ["dep:axum", "dep:futures", "dep:tower-http"]

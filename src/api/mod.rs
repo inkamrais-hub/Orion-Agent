@@ -49,6 +49,14 @@ pub struct ApiState {
 
 /// 创建 API 路由器（所有端点 + 共享状态）
 pub fn create_router(state: Arc<ApiState>) -> Router {
+    let ui_path = if std::path::Path::new("../orion-ui").exists() {
+        "../orion-ui"
+    } else if std::path::Path::new("orion-ui").exists() {
+        "orion-ui"
+    } else {
+        "../orion-ui"
+    };
+
     Router::new()
         .route("/api/health", get(health))
         .route("/api/agents", get(list_agents).post(create_agent))
@@ -56,6 +64,7 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/api/tools", get(list_tools))
         .route("/api/chat", post(chat))
         .route("/api/sessions/{id}/rollback", post(rollback_session))
+        .fallback_service(tower_http::services::ServeDir::new(ui_path))
         .with_state(state)
 }
 
