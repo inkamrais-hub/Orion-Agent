@@ -1,3 +1,5 @@
+[English](README_EN.md) | 中文
+
 # Orion Agent Framework
 
 一个用 Rust 构建的模块化 AI Agent 框架。目标是提供一个可私有化部署、高性能、安全可控的 Agent 平台。
