@@ -12,6 +12,7 @@ pub mod memory;
 pub mod store;
 pub mod files;
 pub mod rollout;
+pub mod sandbox;
 
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};

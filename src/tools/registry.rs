@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use crate::tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
@@ -14,11 +14,48 @@ type ToolBox = Box<dyn Tool>;
 /// 工具注册表
 pub struct ToolRegistry {
     tools: HashMap<String, ToolBox>,
+    /// 已激活的工具名（延迟模式下使用，内部可变性）
+    activated: std::sync::Mutex<HashSet<String>>,
+    /// 是否启用延迟装载模式
+    lazy_mode: bool,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: HashMap::new() }
+        Self {
+            tools: HashMap::new(),
+            activated: std::sync::Mutex::new(HashSet::new()),
+            lazy_mode: false,
+        }
+    }
+
+    /// 启用延迟装载模式
+    pub fn enable_lazy_mode(&mut self) {
+        self.lazy_mode = true;
+    }
+
+    /// 是否处于延迟装载模式
+    pub fn is_lazy_mode(&self) -> bool {
+        self.lazy_mode
+    }
+
+    /// 激活指定工具（线程安全，内部使用 Mutex）
+    ///
+    /// 如果工具存在，将其加入激活集合，返回 true；
+    /// 如果工具不存在，返回 false。
+    pub fn activate(&self, name: &str) -> bool {
+        if self.tools.contains_key(name) {
+            let mut activated = self.activated.lock().unwrap();
+            activated.insert(name.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 获取所有工具名列表
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
     }
 
     /// 注册一个工具
@@ -41,17 +78,58 @@ impl ToolRegistry {
     }
 
     /// 获取所有工具定义 (用于 LLM function calling schema)
+    ///
+    /// 延迟模式下只返回已激活的工具；非延迟模式返回全部。
     pub fn definitions(&self) -> Vec<Value> {
+        if self.lazy_mode {
+            let activated = self.activated.lock().unwrap();
+            self.tools
+                .values()
+                .filter(|t| activated.contains(t.name()))
+                .map(|tool| {
+                    serde_json::json!({
+                        "name": tool.name(),
+                        "description": tool.description(),
+                        "input_schema": tool.input_schema()
+                    })
+                })
+                .collect()
+        } else {
+            self.tools
+                .values()
+                .map(|tool| {
+                    serde_json::json!({
+                        "name": tool.name(),
+                        "description": tool.description(),
+                        "input_schema": tool.input_schema()
+                    })
+                })
+                .collect()
+        }
+    }
+
+    /// 获取所有工具的简要列表（名称+描述，不含 schema）
+    pub fn brief_list(&self) -> Vec<Value> {
         self.tools
             .values()
             .map(|tool| {
                 serde_json::json!({
                     "name": tool.name(),
                     "description": tool.description(),
-                    "input_schema": tool.input_schema()
                 })
             })
             .collect()
+    }
+
+    /// 获取指定工具的完整 schema（用于 load_tool 元工具）
+    pub fn tool_schema(&self, name: &str) -> Option<Value> {
+        self.tools.get(name).map(|tool| {
+            serde_json::json!({
+                "name": tool.name(),
+                "description": tool.description(),
+                "input_schema": tool.input_schema()
+            })
+        })
     }
 
     /// 执行工具（含切面拦截）

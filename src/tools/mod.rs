@@ -12,6 +12,7 @@ pub mod web_search;
 pub mod category;
 pub mod multi_shell;
 pub mod mcp_init;
+pub mod meta_tools;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -195,6 +196,21 @@ pub fn register_default_tools(tools: &mut registry::ToolRegistry) {
     tools.register(ask_user::AskUserTool);
     tools.register(glob_tool::GlobTool);
     tools.register(grep_tool::GrepTool);
+}
+
+/// 注册元工具（延迟装载模式专用）
+///
+/// 注册 `load_tool` 和 `list_categories` 到注册表，并将它们自身激活。
+/// 调用前需确保 registry 已启用 `enable_lazy_mode()`。
+pub fn register_meta_tools(
+    tools: &mut registry::ToolRegistry,
+    weak_ref: std::sync::Weak<registry::ToolRegistry>,
+) {
+    tools.register(meta_tools::LoadToolTool::new(weak_ref.clone()));
+    tools.register(meta_tools::ListCategoriesTool::new(weak_ref));
+    // 元工具自身必须始终可见
+    tools.activate("load_tool");
+    tools.activate("list_categories");
 }
 
 /// 文件写入工具

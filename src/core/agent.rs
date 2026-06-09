@@ -97,6 +97,7 @@ pub struct AgentBuilder {
     hook_engine: Option<HookEngine>,
     exec_policy: Option<ExecPolicy>,
     registry: Option<Arc<AgentRegistry>>,
+    lazy_mode: bool,
 }
 
 impl AgentBuilder {
@@ -109,6 +110,7 @@ impl AgentBuilder {
             hook_engine: None,
             exec_policy: None,
             registry: None,
+            lazy_mode: false,
         }
     }
 
@@ -187,15 +189,34 @@ impl AgentBuilder {
         self
     }
 
+    /// 启用延迟装载模式 — LLM 初始只看到元工具 (list_categories + load_tool)，
+    /// 需要时按名称加载具体工具 Schema，减少每次对话的 Token 消耗。
+    pub fn lazy_tools(mut self) -> Self {
+        self.lazy_mode = true;
+        self
+    }
+
     pub fn build(self) -> crate::Result<Agent> {
         let provider = self.provider.ok_or_else(|| {
             crate::Error::Config("Provider is required. Call .provider() before .build()".into())
         })?;
 
+        let tools = if self.lazy_mode {
+            // 延迟装载模式：使用 Arc::new_cyclic 打破 ToolRegistry ↔ 元工具 循环引用
+            let mut tools = self.tools;
+            tools.enable_lazy_mode();
+            Arc::new_cyclic(|weak| {
+                crate::tools::register_meta_tools(&mut tools, weak.clone());
+                tools
+            })
+        } else {
+            Arc::new(self.tools)
+        };
+
         Ok(Agent {
             config: self.config,
             provider,
-            tools: Arc::new(self.tools),
+            tools,
             cache: self.cache.unwrap_or_else(|| GlobalCache::new(1024, 300, 64)),
             hook_engine: self.hook_engine.map(|e| Arc::new(tokio::sync::Mutex::new(e))),
             exec_policy: self.exec_policy.map(Arc::new),

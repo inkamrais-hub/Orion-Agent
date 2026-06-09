@@ -9,6 +9,7 @@
 //!   - Collaborative: 协商式 (Worker 间可通信)
 
 pub mod coordinator;
+pub mod map_reduce;
 pub mod plan;
 pub mod worker;
 
