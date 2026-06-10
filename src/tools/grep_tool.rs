@@ -78,7 +78,8 @@ impl Tool for GrepTool {
         }.map_err(|e| crate::Error::Tool(format!("Invalid regex '{}': {}", pattern, e)))?;
 
         let mut file_results: Vec<FileSearchResult> = Vec::new();
-        search_dir(std::path::Path::new(root), &re, glob_filter, &mut file_results, max_results, context_lines, count_only, 0);
+        let mut running_total = 0usize;
+        search_dir(std::path::Path::new(root), &re, glob_filter, &mut file_results, max_results, context_lines, count_only, 0, &mut running_total);
 
         if file_results.is_empty() {
             return Ok(ToolResult {
@@ -173,18 +174,19 @@ fn search_dir(
     context_lines: usize,
     count_only: bool,
     depth: usize,
+    running_total: &mut usize,
 ) {
-    if depth > 10 || total_matches(results) >= max { return; }
+    if depth > 10 || *running_total >= max { return; }
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
-        if total_matches(results) >= max { return; }
+        if *running_total >= max { return; }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
             if name.starts_with('.') || name == "target" || name == "node_modules" || name == ".git" {
                 continue;
             }
-            search_dir(&path, re, glob_filter, results, max, context_lines, count_only, depth + 1);
+            search_dir(&path, re, glob_filter, results, max, context_lines, count_only, depth + 1, running_total);
         } else {
             // Apply glob filter
             if let Some(glob) = glob_filter {
@@ -202,7 +204,7 @@ fn search_dir(
                 let mut file_matches = Vec::new();
 
                 for (i, line) in lines.iter().enumerate() {
-                    if total_matches(results) + file_matches.len() >= max { break; }
+                    if *running_total + file_matches.len() >= max { break; }
                     if re.is_match(line) {
                         if count_only {
                             // count_only 模式: 只记录行号和内容, 不需要上下文
@@ -243,6 +245,7 @@ fn search_dir(
                 }
 
                 if !file_matches.is_empty() {
+                    *running_total += file_matches.len();
                     results.push(FileSearchResult {
                         path: path.clone(),
                         matches: file_matches,
@@ -251,10 +254,6 @@ fn search_dir(
             }
         }
     }
-}
-
-fn total_matches(results: &[FileSearchResult]) -> usize {
-    results.iter().map(|r| r.matches.len()).sum()
 }
 
 fn matches_glob_simple(name: &str, glob: &str) -> bool {

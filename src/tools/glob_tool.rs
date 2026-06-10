@@ -69,7 +69,7 @@ impl Tool for GlobTool {
             .unwrap_or_default();
 
         let mut matches = Vec::new();
-        find_matches(std::path::Path::new(root), pattern, &user_ignore, &mut matches, 0);
+        find_matches(std::path::Path::new(root), std::path::Path::new(root), pattern, &user_ignore, &mut matches, 0);
 
         // Sort by modification time (newest first)
         matches.sort_by(|a, b| {
@@ -110,6 +110,7 @@ const DEFAULT_IGNORES: &[&str] = &["target", "node_modules", ".git"];
 
 fn find_matches(
     dir: &std::path::Path,
+    root: &std::path::Path,
     pattern: &str,
     user_ignore: &[String],
     results: &mut Vec<std::path::PathBuf>,
@@ -130,29 +131,91 @@ fn find_matches(
             if DEFAULT_IGNORES.contains(&name.as_str()) || user_ignore.iter().any(|i| *i == name) {
                 continue;
             }
-            find_matches(&path, pattern, user_ignore, results, depth + 1);
-        } else if matches_glob(&name, pattern, dir, results.first().map(|r| r.parent().unwrap_or(dir))) {
-            results.push(path);
+            find_matches(&path, root, pattern, user_ignore, results, depth + 1);
+        } else {
+            let rel_path = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+            if matches_glob(&rel_path, pattern) {
+                results.push(path);
+            }
         }
     }
 }
 
 /// 增强的 glob 匹配: 支持 ** 递归、* 通配、*.{ext} 多扩展名
-fn matches_glob(name: &str, pattern: &str, _dir: &std::path::Path, _root: Option<&std::path::Path>) -> bool {
+fn matches_glob(path: &str, pattern: &str) -> bool {
     // 通配所有
     if pattern == "*" { return true; }
+
+    // 路径归一化: Windows 反斜杠转正斜杠
+    let path_normalized = path.replace('\\', "/");
+
+    if pattern.contains("**") {
+        // ** 递归匹配: 分割为 prefix 和 suffix
+        let parts: Vec<&str> = pattern.splitn(2, "**").collect();
+        let prefix = parts[0].trim_end_matches('/');
+        let suffix = parts.get(1).map(|s| s.trim_start_matches('/')).unwrap_or("");
+
+        // 前缀匹配: 路径开头必须匹配 prefix
+        let prefix_match = prefix.is_empty()
+            || path_normalized == prefix
+            || path_normalized.starts_with(&format!("{}/", prefix));
+
+        if !prefix_match { return false; }
+
+        // 后缀匹配: 路径末尾必须匹配 suffix
+        if suffix.is_empty() { return true; }
+
+        // 检查后缀是否以路径分隔符正确衔接
+        let suffix_start_ok = if path_normalized.len() > prefix.len() {
+            let after_prefix = &path_normalized[prefix.len()..];
+            after_prefix.starts_with('/') || prefix.is_empty()
+        } else {
+            prefix.is_empty()
+        };
+
+        if !suffix_start_ok { return false; }
+
+        // suffix 可能是 "**/*.ts" (再次包含 **) 或 "*.ts" 等
+        if suffix.contains("**") {
+            // 递归处理嵌套 **
+            return matches_glob(&path_normalized, suffix);
+        }
+
+        // suffix 包含 '/' (多段路径): 检查路径是否以 suffix 结尾
+        if suffix.contains('/') {
+            return path_normalized.ends_with(&format!("/{}", suffix))
+                || path_normalized == suffix;
+        }
+
+        // suffix 是单段 (如 "*.ts"): 只匹配文件名
+        let filename = path_normalized.rsplit('/').next().unwrap_or(&path_normalized);
+        return matches_glob_segment(filename, suffix);
+    }
 
     // 分割 pattern 为路径段
     let parts: Vec<&str> = pattern.split('/').collect();
 
-    // 单段模式 (无 /)
+    // 单段模式 (无 /): 只匹配文件名
     if parts.len() == 1 {
-        return matches_glob_segment(name, parts[0]);
+        let filename = path_normalized.rsplit('/').next().unwrap_or(&path_normalized);
+        return matches_glob_segment(filename, parts[0]);
     }
 
-    // 多段模式: 最后一段匹配文件名
+    // 多段模式: 匹配完整相对路径
+    let pattern_path = parts.join("/");
+    if path_normalized == pattern_path {
+        return true;
+    }
+    // 也尝试只匹配文件名 (兼容 "src/*.rs" 对 "src/foo.rs" 的匹配)
     if let Some(last) = parts.last() {
-        return matches_glob_segment(name, last);
+        let filename = path_normalized.rsplit('/').next().unwrap_or(&path_normalized);
+        if matches_glob_segment(filename, last) {
+            // 确保路径前缀也匹配
+            let expected_prefix = &parts[..parts.len() - 1].join("/");
+            let path_prefix = path_normalized.rsplitn(2, '/').nth(1).unwrap_or("");
+            return path_prefix == expected_prefix
+                || path_prefix.ends_with(&format!("/{}", expected_prefix));
+        }
     }
 
     false

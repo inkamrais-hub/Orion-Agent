@@ -1,3 +1,6 @@
+//! DEPRECATED: 此模块已被 `src/audit/mod.rs` 取代
+//! 保留仅供向后兼容，新代码请使用 `crate::audit::AUDIT_LOGGER`
+//!
 //! 审查 (Audit) 日志系统
 //!
 //! 记录 Agent 的每一个操作: 模型输出、工具调用、护栏决策、压缩事件
@@ -18,6 +21,7 @@ use std::path::Path;
 // ============================================================
 
 /// 审查事件 — 所有 Agent 操作的统一记录格式
+#[deprecated(note = "Use crate::audit instead")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum AuditEvent {
@@ -130,6 +134,7 @@ impl AuditEvent {
 // ============================================================
 
 /// 审查日志 — 追加写入 JSON Lines 文件
+#[deprecated(note = "Use crate::audit instead")]
 pub struct AuditLogger {
     file: tokio::io::BufWriter<tokio::fs::File>,
     path: String,
@@ -181,6 +186,7 @@ impl AuditLogger {
 // ============================================================
 
 /// 无操作审查器 — 所有 record 都静默丢弃
+#[deprecated(note = "Use crate::audit instead")]
 pub struct NullAuditLogger;
 
 impl NullAuditLogger {

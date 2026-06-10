@@ -48,7 +48,9 @@ fn do_init() {
                 .with_filter(filter)
         );
 
-    tracing::subscriber::set_global_default(subscriber).ok();
+    if let Err(_) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!("Warning: tracing subscriber already set, logging may not work");
+    }
 
     tracing::info!(
         subsystem = "gateway",

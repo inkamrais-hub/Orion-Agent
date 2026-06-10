@@ -60,7 +60,7 @@ impl McpClient {
         let request = json!({"jsonrpc":"2.0","id":self.request_id,"method":method,"params":params});
         let msg = format!("{}\n", serde_json::to_string(&request)?);
         self.stdin.write_all(msg.as_bytes()).await.map_err(|e| crate::Error::Agent(format!("MCP write: {}", e)))?;
-        self.stdin.flush().await.ok();
+        self.stdin.flush().await.map_err(|e| crate::Error::Agent(format!("MCP flush: {}", e)))?;
 
         // 30 秒超时，防止 server 卡住
         let mut line = String::new();
@@ -82,7 +82,7 @@ impl McpClient {
         let notification = json!({"jsonrpc":"2.0","method":method,"params":params});
         let msg = format!("{}\n", serde_json::to_string(&notification)?);
         self.stdin.write_all(msg.as_bytes()).await.map_err(|e| crate::Error::Agent(format!("MCP write: {}", e)))?;
-        self.stdin.flush().await.ok();
+        self.stdin.flush().await.map_err(|e| crate::Error::Agent(format!("MCP flush: {}", e)))?;
         Ok(())
     }
 
@@ -166,29 +166,33 @@ pub async fn connect_mcp_server(
     config: &McpServerConfig,
     registry: &mut crate::tools::registry::ToolRegistry,
 ) -> crate::Result<()> {
-    // 1. 从池中获取已有连接，不存在则首次创建
-    let pooled = if let Some(existing) = MCP_POOL.get(&config.name) {
-        existing.clone()
-    } else {
-        let mut client = McpClient::connect(config).await?;
-        let tool_defs = client.list_tools().await?;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<McpRequest>();
+    // 使用 entry API 原子操作，防止竞争创建多个子进程
+    let entry = MCP_POOL.entry(config.name.clone());
+    let pooled = match entry {
+        dashmap::mapref::entry::Entry::Occupied(occupied) => {
+            occupied.get().clone()
+        }
+        dashmap::mapref::entry::Entry::Vacant(vacant) => {
+            let mut client = McpClient::connect(config).await?;
+            let tool_defs = client.list_tools().await?;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<McpRequest>();
 
-        // 后台任务：将池中所有 proxy 的请求转发到子进程
-        tokio::spawn(async move {
-            while let Some(req) = rx.recv().await {
-                let result = client.call_tool(&req.tool_name, req.arguments).await;
-                let _ = req.response_tx.send(result);
-            }
-            client.shutdown().await;
-        });
+            // 后台任务：将池中所有 proxy 的请求转发到子进程
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    let result = client.call_tool(&req.tool_name, req.arguments).await;
+                    let _ = req.response_tx.send(result);
+                }
+                client.shutdown().await;
+            });
 
-        let p = Arc::new(McpPooledClient { request_tx: tx, tool_defs });
-        MCP_POOL.insert(config.name.clone(), p.clone());
-        p
+            let p = Arc::new(McpPooledClient { request_tx: tx, tool_defs });
+            vacant.insert(p.clone());
+            p
+        }
     };
 
-    // 2. 注册代理工具（复用池中的 request_tx）
+    // 注册代理工具（复用池中的 request_tx）
     for def in &pooled.tool_defs {
         let proxy = McpToolProxy::new(def.clone(), pooled.request_tx.clone());
         registry.register(proxy);

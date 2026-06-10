@@ -26,21 +26,21 @@ pub struct OpenAICompatProvider {
 }
 
 impl OpenAICompatProvider {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> crate::Result<Self> {
         let api_key = std::env::var("LLM_API_KEY")
-            .expect("LLM_API_KEY must be set in .env or environment");
+            .map_err(|_| crate::Error::Config("LLM_API_KEY must be set in .env or environment".into()))?;
         let api_base = std::env::var("LLM_API_BASE")
             .unwrap_or_else(|_| "https://api.deepseek.com".into());
         let model = std::env::var("LLM_MODEL")
             .unwrap_or_else(|_| "deepseek-v4-flash".into());
-        Self::new(&api_base, &api_key, &model)
+        Ok(Self::new(&api_base, &api_key, &model))
     }
 
     pub fn new(api_base: &str, api_key: &str, model: &str) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .expect("Failed to create HTTP client");
+            .unwrap_or_else(|_| Client::new());
         Self { client, api_base: api_base.trim_end_matches('/').to_string(), api_key: api_key.to_string(), model: model.to_string() }
     }
 

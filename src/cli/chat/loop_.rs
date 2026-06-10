@@ -6,22 +6,17 @@ use super::commands::SlashRegistry;
 use crate::audit::{AuditEvent as GlobalAuditEvent, AUDIT_LOGGER};
 use crate::cli::execute::execute_turn;
 use crate::config::OrionConfig;
-use crate::core::cache::GlobalCache;
-use crate::core::provider::Provider;
-use crate::core::providers::openai_compat::OpenAICompatProvider;
-use crate::session::manager::SessionManager;
+use crate::session::UnifiedStore;
+use crate::session::store::{SessionMeta, SessionStatus as StoreSessionStatus};
 use crate::session::memory::{extract_memories, SessionMemory};
-use crate::tools::a2a_message::{ListPeersTool, SendMessageTool};
-use crate::tools::agent_tool::SubAgentTool;
-use crate::tools::registry::ToolRegistry;
+use std::sync::Arc;
+use chrono::Utc;
+
 
 pub struct ChatState {
-    pub session_mgr: SessionManager,
+    pub store: Arc<UnifiedStore>,
     pub current_session: String,
-    pub provider: Box<dyn Provider>,
-    pub model: String,
-    pub tools: ToolRegistry,
-    pub cache: GlobalCache,
+    pub agent: crate::core::agent::Agent,
     pub memory: SessionMemory,
     /// 待发送的图片列表 (Message Block 方案)
     pub pending_images: Vec<crate::core::provider::ContentBlock>,
@@ -29,78 +24,49 @@ pub struct ChatState {
     pub thinking: bool,
     /// 思考深度: low/medium/high/max/xhigh
     pub reasoning_effort: String,
-}
-
-/// 注册全部工具
-fn register_all_tools(config: &OrionConfig) -> (ToolRegistry, GlobalCache) {
-    let mut tools = ToolRegistry::new();
-    crate::tools::register_default_tools(&mut tools);
-    // chat 专用工具
-    tools.register(SubAgentTool::new());
-    tools.register(SendMessageTool);
-    tools.register(ListPeersTool);
-
-    let cache = GlobalCache::from_config(&config.cache);
-    (tools, cache)
+    pub config: OrionConfig,
 }
 
 /// 启动对话
 pub async fn run(config: OrionConfig) -> crate::Result<()> {
     let model_config = config.active_model();
-    let session_mgr = SessionManager::open().await?;
+    let store = Arc::new(UnifiedStore::open().await?);
 
     // 恢复或创建 session
-    let sessions = session_mgr.list().await?;
+    let sessions = store.list_sessions(100).await?;
     let session_id = if config.cli.auto_resume {
         if let Some(latest) = sessions.iter().max_by_key(|s| s.updated_at) {
             tracing::info!(session = %latest.session_id, "Resuming session");
             eprintln!("⚡ Resuming session {}", &latest.session_id[..8]);
             latest.session_id.clone()
         } else {
-            let id = session_mgr.create(&model_config.name).await?;
+            let id = create_new_session(&store, &model_config.name).await?;
             eprintln!("⚡ New session {}", &id[..8]);
             id
         }
     } else {
-        let id = session_mgr.create(&model_config.name).await?;
+        let id = create_new_session(&store, &model_config.name).await?;
         eprintln!("⚡ New session {}", &id[..8]);
         id
     };
 
-    // API Key: 配置 > 环境变量
-    let api_key = model_config.api_key.clone()
-        .filter(|k| !k.is_empty())
-        .or_else(|| std::env::var("LLM_API_KEY").ok())
-        .unwrap_or_default();
-
-    let provider: Box<dyn Provider> = Box::new(OpenAICompatProvider::new(
-        &model_config.endpoint,
-        &api_key,
-        &model_config.name,
-    ));
-
-    let (mut tools, cache) = register_all_tools(&config);
-
-    // 连接配置中的 MCP server 并注入工具
-    crate::tools::mcp_init::init_mcp_tools(&config, &mut tools).await;
-
+    // 使用统一的构建函数创建 Agent 实例
+    let agent = crate::gateway::build_main_agent(&config, false).await?;
     let memory = SessionMemory::load();
 
     let mut state = ChatState {
-        session_mgr,
+        store,
         current_session: session_id,
-        provider,
-        model: model_config.name.clone(),
-        tools,
-        cache,
+        agent,
         memory,
         pending_images: Vec::new(),
         thinking: model_config.thinking,
         reasoning_effort: "medium".into(),
+        config,
     };
 
     // 构建 system prompt，注入 memory 上下文
-    let mut system_prompt = crate::cli::execute::build_system_prompt(&state.tools);
+    let mut system_prompt = crate::cli::execute::build_system_prompt(state.agent.tools());
     let memory_ctx = state.memory.as_context();
     if !memory_ctx.is_empty() {
         system_prompt.push_str("\n");
@@ -109,7 +75,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
     }
 
     eprintln!("⚡ Orion Agent ready | model: {} | tools: {} | session: {} | memories: {}",
-        state.model, state.tools.len(), &state.current_session[..8], state.memory.len());
+        state.agent.config().model, state.agent.tools().len(), &state.current_session[..8], state.memory.len());
     eprintln!("  Type /help for commands, /exit to quit\n");
 
     // 审计: 会话开始
@@ -118,7 +84,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
         logger.log_with_session(
             GlobalAuditEvent::SessionStart {
                 session_id: state.current_session.clone(),
-                model: state.model.clone(),
+                model: state.agent.config().model.clone(),
             },
             "chat",
             &state.current_session,
@@ -131,7 +97,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
 
     // chat 循环
     loop {
-        eprint!("{}", config.cli.prompt);
+        eprint!("{}", state.config.cli.prompt);
         use std::io::Write;
         std::io::stderr().flush().ok();
 
@@ -144,7 +110,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
 
         // 命令路由
         if input.starts_with('/') {
-            match handle_command(input, &mut state, &config, &slash_registry).await {
+            match handle_command(input, &mut state, &slash_registry).await {
                 CmdResult::Continue => continue,
                 CmdResult::Exit => break,
                 CmdResult::Error(msg) => { eprintln!("❌ {}", msg); continue; }
@@ -161,10 +127,15 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
             Some(imgs)
         };
         match execute_turn(
-            &*state.provider, &state.tools, &state.cache,
-            &state.session_mgr, &state.current_session, input, &state.model,
-            &system_prompt, None, images,
-            state.thinking, &state.reasoning_effort,
+            &state.agent,
+            &state.store,
+            &state.current_session,
+            input,
+            &system_prompt,
+            None,
+            images,
+            state.thinking,
+            &state.reasoning_effort,
         ).await {
             Ok(response) => {
                 // 从本轮对话中提取记忆
@@ -203,6 +174,28 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
     Ok(())
 }
 
+/// 创建新 session 并返回 session_id
+async fn create_new_session(store: &UnifiedStore, model: &str) -> crate::Result<String> {
+    let session_id = crate::session::store::generate_session_id();
+    let now = Utc::now();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".into());
+    store.create_session(&SessionMeta {
+        session_id: session_id.clone(),
+        agent_name: "main".into(),
+        model: model.to_string(),
+        working_dir: cwd,
+        status: StoreSessionStatus::Active,
+        created_at: now,
+        updated_at: now,
+        turn_count: 0,
+        tool_call_count: 0,
+        total_tokens: 0,
+    }).await?;
+    Ok(session_id)
+}
+
 enum CmdResult {
     Continue,
     Exit,
@@ -212,7 +205,6 @@ enum CmdResult {
 async fn handle_command(
     input: &str,
     state: &mut ChatState,
-    _config: &OrionConfig,
     slash_registry: &SlashRegistry,
 ) -> CmdResult {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
@@ -287,7 +279,8 @@ async fn handle_command(
             eprintln!("已清空 {} 张待发送图片", count);
         }
         "/new" => {
-            match state.session_mgr.create(&state.model).await {
+            let model = state.agent.config().model.clone();
+            match create_new_session(&state.store, &model).await {
                 Ok(id) => {
                     state.current_session = id.clone();
                     eprintln!("⚡ New session: {}", &id[..8]);
@@ -296,7 +289,7 @@ async fn handle_command(
             }
         }
         "/list" => {
-            match state.session_mgr.list().await {
+            match state.store.list_sessions(100).await {
                 Ok(sessions) => {
                     if sessions.is_empty() {
                         eprintln!("No sessions.");
@@ -313,7 +306,7 @@ async fn handle_command(
         "/resume" => {
             match arg {
                 Some(id_prefix) => {
-                    let sessions = state.session_mgr.list().await.unwrap_or_default();
+                    let sessions = state.store.list_sessions(100).await.unwrap_or_default();
                     if let Some(s) = sessions.iter().find(|s| s.session_id.starts_with(id_prefix)) {
                         state.current_session = s.session_id.clone();
                         eprintln!("⚡ Resumed: {}", &s.session_id[..8]);
@@ -327,13 +320,14 @@ async fn handle_command(
         "/drop" => {
             match arg {
                 Some(id_prefix) => {
-                    let sessions = state.session_mgr.list().await.unwrap_or_default();
+                    let sessions = state.store.list_sessions(100).await.unwrap_or_default();
                     if let Some(s) = sessions.iter().find(|s| s.session_id.starts_with(id_prefix)) {
                         let sid = s.session_id.clone();
-                        state.session_mgr.delete(&sid).await.ok();
+                        state.store.delete_session(&sid).await.ok();
                         eprintln!("🗑 Dropped: {}", &sid[..8]);
                         if sid == state.current_session {
-                            match state.session_mgr.create(&state.model).await {
+                            let model = state.agent.config().model.clone();
+                            match create_new_session(&state.store, &model).await {
                                 Ok(new_id) => {
                                     state.current_session = new_id.clone();
                                     eprintln!("⚡ Auto-created new session: {}", &new_id[..8]);
@@ -391,27 +385,20 @@ async fn handle_command(
             match arg {
                 Some(model_name) => {
                     // 切换模型
-                    let config = OrionConfig::load();
-                    if let Some(model_config) = config.models.iter().find(|m| m.name == model_name) {
-                        // 创建新的 Provider
-                        let api_key = model_config.api_key.clone()
-                            .filter(|k| !k.is_empty())
-                            .or_else(|| std::env::var("LLM_API_KEY").ok())
-                            .unwrap_or_default();
-                        if api_key.is_empty() {
-                            return CmdResult::Error(format!("模型 '{}' 未配置 API Key", model_name));
+                    let mut config = OrionConfig::load();
+                    if config.models.iter().any(|m| m.name == model_name) {
+                        config.default_model = model_name.to_string();
+                        if let Err(e) = config.save() {
+                            return CmdResult::Error(format!("保存配置失败: {}", e));
                         }
-                        let new_provider: Box<dyn crate::core::provider::Provider> = Box::new(
-                            crate::core::providers::openai_compat::OpenAICompatProvider::new(
-                                &model_config.endpoint, &api_key, &model_config.name,
-                            ),
-                        );
-                        state.provider = new_provider;
-                        state.model = model_config.name.clone();
-                        eprintln!("✓ 已切换到: {}", model_name);
-                        eprintln!("  endpoint: {}", model_config.endpoint);
-                        eprintln!("  thinking: {}", model_config.thinking);
-                        eprintln!("  vision:   {}", model_config.supports_vision());
+                        match crate::gateway::build_main_agent(&config, false).await {
+                            Ok(new_agent) => {
+                                state.agent = new_agent;
+                                state.config = config;
+                                eprintln!("✓ 已切换模型到: {}", model_name);
+                            }
+                            Err(e) => return CmdResult::Error(format!("构建新模型实例失败: {}", e)),
+                        }
                     } else {
                         return CmdResult::Error(format!("模型 '{}' 不存在。使用 /model 查看可用模型", model_name));
                     }
@@ -419,11 +406,12 @@ async fn handle_command(
                 None => {
                     // 显示当前模型和可用模型列表
                     let config = OrionConfig::load();
-                    eprintln!("当前模型: {}", state.model);
+                    let current_model = state.agent.config().model.clone();
+                    eprintln!("当前模型: {}", current_model);
                     eprintln!();
                     eprintln!("可用模型:");
                     for m in &config.models {
-                        let marker = if m.name == state.model { " ← current" } else { "" };
+                        let marker = if m.name == current_model { " ← current" } else { "" };
                         let mut flags = Vec::new();
                         if m.thinking { flags.push("thinking"); }
                         if m.supports_vision() { flags.push("vision"); }
@@ -437,8 +425,8 @@ async fn handle_command(
         }
         "/exit" | "/quit" => return CmdResult::Exit,
         _ => {
-            // 通用斜杠命令注册表 (chat/commands.rs 处理 /clear, /status, /history, /memory, /sessions, /delete, /restore, /trash)
-            match slash_registry.handle(input) {
+            // 通用斜杠命令注册表 (异步)
+            match slash_registry.handle(input).await {
                 Some(response) => {
                     if !response.is_empty() {
                         eprintln!("{}", response);

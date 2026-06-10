@@ -260,6 +260,27 @@ impl Agent {
         &self.config
     }
 
+    /// 获取缓存引用
+    pub fn cache(&self) -> &GlobalCache {
+        &self.cache
+    }
+
+    /// 获取 Hook 引擎引用
+    pub fn hook_engine(&self) -> Option<Arc<tokio::sync::Mutex<HookEngine>>> {
+        self.hook_engine.clone()
+    }
+
+    /// 获取执行策略引用
+    pub fn exec_policy(&self) -> Option<Arc<ExecPolicy>> {
+        self.exec_policy.clone()
+    }
+
+    /// 获取注册表引用
+    pub fn registry(&self) -> Option<Arc<AgentRegistry>> {
+        self.registry.clone()
+    }
+
+
     /// 从 AgentConfig 构建 SimpleLoopConfig
     fn build_loop_config(&self, session_id: Option<String>) -> SimpleLoopConfig {
         SimpleLoopConfig {
@@ -286,7 +307,7 @@ impl Agent {
             event_callback: None,
             registry: self.registry.clone(),
             hook_engine: self.hook_engine.clone(),
-            exec_policy: self.exec_policy.as_deref(),
+            exec_policy: self.exec_policy.clone(),
             guardrails: None,
             rollout: None,
             goal_manager: None,
@@ -361,7 +382,7 @@ impl Agent {
             };
 
             let event_tx = tx.clone();
-            let event_callback: EventCallback = Box::new(move |event: &LoopEvent| {
+            let event_callback: EventCallback = Arc::new(move |event: &LoopEvent| {
                 let agent_event = match event {
                     LoopEvent::ThinkingDelta { text } => AgentEvent::Thinking(text.clone()),
                     LoopEvent::TextDelta(text) => AgentEvent::Text(text.clone()),
@@ -395,7 +416,7 @@ impl Agent {
                 event_callback: Some(event_callback),
                 registry,
                 hook_engine,
-                exec_policy: exec_policy.as_deref(),
+                exec_policy: exec_policy.clone(),
                 guardrails: None,
                 rollout: None,
                 goal_manager: None,

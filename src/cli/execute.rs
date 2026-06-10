@@ -1,10 +1,12 @@
-use crate::core::cache::GlobalCache;
+use std::sync::Arc;
+
 use crate::core::r#loop::{run_simple_loop, LoopOutcome, LoopEvent, EventCallback, tool_title, classify_bash_risk, BashRisk, truncate_str};
-use crate::session::manager::SessionManager;
-use crate::session::TranscriptEntry;
+use crate::session::UnifiedStore;
+use crate::session::unified::TranscriptEntry;
 use crate::tools::registry::ToolRegistry;
 use chrono::Utc;
 use uuid::Uuid;
+
 
 /// 构建 System Prompt (静态部分，用于 Prompt Caching)
 pub fn build_system_prompt_static() -> String {
@@ -81,19 +83,14 @@ pub fn build_system_prompt(_tools: &ToolRegistry) -> String {
 }
 
 /// 创建默认的 CLI 事件回调 — 负责终端 UI 渲染
-///
-/// 将 UI 渲染逻辑（Thinking、ToolStart/End、TextDelta 等的终端输出）
-/// 从执行逻辑中解耦，便于复用和测试。
 pub fn create_cli_event_callback() -> EventCallback {
     let thinking_buf = std::sync::Mutex::new(String::new());
     let in_thinking = std::sync::Mutex::new(false);
-    const W: usize = 60;
 
-    Box::new(move |event: &LoopEvent| {
+    Arc::new(move |event: &LoopEvent| {
         match event {
             LoopEvent::ThinkingDelta { text } => {
                 if text.is_empty() {
-                    eprintln!();
                     *in_thinking.lock().unwrap() = true;
                     thinking_buf.lock().unwrap().clear();
                 } else {
@@ -101,57 +98,69 @@ pub fn create_cli_event_callback() -> EventCallback {
                 }
             }
             LoopEvent::TextDelta(text) => {
-                flush_thinking(&thinking_buf, &in_thinking, W);
+                flush_thinking(&thinking_buf, &in_thinking);
                 use std::io::Write;
                 print!("{}", text);
                 std::io::stdout().flush().ok();
             }
             LoopEvent::ToolStart { tool_name, input, .. } => {
-                flush_thinking(&thinking_buf, &in_thinking, W);
+                flush_thinking(&thinking_buf, &in_thinking);
                 if tool_name == "bash" {
                     let cmd = input["command"].as_str().unwrap_or("?");
                     let risk = classify_bash_risk(cmd);
                     let icon = match risk {
-                        BashRisk::Safe => "🟢", BashRisk::Low => "🟡",
-                        BashRisk::Medium => "🟠", BashRisk::High => "🔴", BashRisk::Critical => "⛔",
+                        BashRisk::Safe => "🟢 [Safe]",
+                        BashRisk::Low => "🟡 [Low Risk]",
+                        BashRisk::Medium => "🟠 [Medium Risk]",
+                        BashRisk::High => "🔴 [High Risk]",
+                        BashRisk::Critical => "⛔ [Critical Risk]",
                     };
-                    print_box(&format!("{} Bash: {}", icon, truncate_str(cmd, 40)), W);
+                    eprintln!("🛠️  运行 Bash ({}): {}", icon, cmd);
                 } else {
                     let title = tool_title(tool_name, input);
-                    print_box(&title, W);
+                    eprintln!("🛠️  调用工具: {}", title);
                 }
             }
             LoopEvent::ToolEnd { tool_name, result, is_error, duration_ms, .. } => {
-                let status = if *is_error { "✗" } else { "✓" };
-                let header = format!("{} {} ({}ms)", status, tool_name, duration_ms);
-                print_result_box(&header, result, if tool_name == "bash" { 300 } else { 200 }, W);
+                if *is_error {
+                    eprintln!("✗ {} 执行失败 ({}ms)", tool_name, duration_ms);
+                    if !result.trim().is_empty() {
+                        let lines: Vec<&str> = result.lines().take(5).collect();
+                        for line in lines {
+                            eprintln!("  │ {}", truncate_str(line, 100));
+                        }
+                        if result.lines().count() > 5 {
+                            eprintln!("  │ ... (output truncated)");
+                        }
+                    }
+                } else {
+                    eprintln!("✓ {} 执行成功 ({}ms)", tool_name, duration_ms);
+                }
+                eprintln!();
             }
             LoopEvent::TurnComplete { turn } => {
-                print_box(&format!("Turn {}", turn), W);
+                eprintln!("─── 轮次 {} 完成 ───\n", turn);
             }
             LoopEvent::Error(msg) => {
-                print_box(&format!("Error: {}", msg), W);
+                eprintln!("❌ 错误: {}\n", msg);
             }
         }
     })
 }
 
 pub async fn execute_turn(
-    provider: &dyn crate::core::provider::Provider,
-    tools: &ToolRegistry,
-    cache: &GlobalCache,
-    session_mgr: &SessionManager,
+    agent: &crate::core::agent::Agent,
+    store: &Arc<UnifiedStore>,
     session_id: &str,
     user_input: &str,
-    model: &str,
     system_prompt: &str,
     event_callback: Option<EventCallback>,
     images: Option<Vec<crate::core::provider::ContentBlock>>,
     thinking: bool,
     reasoning_effort: &str,
 ) -> crate::Result<String> {
-    let history = session_mgr.restore(session_id).await.unwrap_or_default();
-    session_mgr.append_transcript(session_id, &TranscriptEntry {
+    let history = store.get_transcript(session_id).await.unwrap_or_default();
+    store.append_transcript(session_id, &TranscriptEntry {
         id: Uuid::new_v4().to_string(),
         parent_id: history.last().map(|e| e.id.clone()),
         role: "user".to_string(),
@@ -162,7 +171,6 @@ pub async fn execute_turn(
 
     let event_cb = event_callback.unwrap_or_else(create_cli_event_callback);
 
-    // 思考深度映射到 max_output_tokens
     let max_output_tokens = match reasoning_effort {
         "low" => 2048,
         "medium" => 4096,
@@ -173,12 +181,12 @@ pub async fn execute_turn(
     };
 
     let loop_config = crate::core::r#loop::SimpleLoopConfig {
-        model: model.to_string(),
+        model: agent.config().model.clone(),
         system_prompt: system_prompt.to_string(),
-        max_turns: 20,
-        max_tool_calls: 30,
-        token_budget: 128_000,
-        agent_id: "main".into(),
+        max_turns: agent.config().max_turns,
+        max_tool_calls: agent.config().max_tool_calls,
+        token_budget: agent.config().token_budget,
+        agent_id: agent.config().name.clone(),
         session_id: session_id.to_string(),
         model_caps: crate::core::r#loop::ModelCaps {
             thinking,
@@ -186,10 +194,18 @@ pub async fn execute_turn(
             max_output_tokens,
         },
     };
+    
     let outcome = run_simple_loop(
-        provider, tools, cache, &loop_config, user_input,
+        agent.provider(),
+        agent.tools(),
+        agent.cache(),
+        &loop_config,
+        user_input,
         crate::core::r#loop::SimpleLoopContext {
             event_callback: Some(event_cb),
+            hook_engine: agent.hook_engine(),
+            exec_policy: agent.exec_policy(),
+            registry: agent.registry(),
             images,
             ..Default::default()
         },
@@ -206,7 +222,7 @@ pub async fn execute_turn(
         LoopOutcome::GuardrailDenied { reason } => format!("[Guardrail] {}", reason),
     };
 
-    session_mgr.append_transcript(session_id, &TranscriptEntry {
+    store.append_transcript(session_id, &TranscriptEntry {
         id: Uuid::new_v4().to_string(),
         parent_id: history.last().map(|e| e.id.clone()),
         role: "assistant".to_string(),
@@ -214,44 +230,34 @@ pub async fn execute_turn(
         tool_calls: None,
         timestamp: Utc::now(),
     }).await.ok();
-    session_mgr.update(session_id, |e| { e.turn_count += 1; }).await.ok();
+
+    // 更新 session 统计 (turn_count + 1)
+    if let Ok(Some(meta)) = store.get_session(session_id).await {
+        store.update_session_stats(
+            session_id,
+            meta.turn_count + 1,
+            meta.tool_call_count,
+            meta.total_tokens,
+        ).await.ok();
+    }
+
     Ok(response)
 }
 
-fn flush_thinking(buf: &std::sync::Mutex<String>, active: &std::sync::Mutex<bool>, w: usize) {
+fn flush_thinking(buf: &std::sync::Mutex<String>, active: &std::sync::Mutex<bool>) {
     if *active.lock().unwrap() {
         let content = buf.lock().unwrap().clone();
         if !content.is_empty() {
-            let header = " Thinking ";
-            let pad = "─".repeat(w.saturating_sub(header.len() + 2).max(0));
-            eprintln!("╭─{}{}╮", header, pad);
-            for para in content.split("\n\n") {
-                let trimmed = para.trim();
+            eprintln!("\n🧠 [Thinking]");
+            for line in content.lines() {
+                let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    eprintln!("│ {:<width$} │", truncate_str(trimmed, w - 4), width = w - 2);
+                    eprintln!("   │ {}", trimmed);
                 }
             }
-            eprintln!("╰{}╯", "─".repeat(w));
+            eprintln!();
         }
         *active.lock().unwrap() = false;
         *buf.lock().unwrap() = String::new();
     }
-}
-
-fn print_box(title: &str, w: usize) {
-    let header = format!(" {} ", title);
-    let pad = "─".repeat(w.saturating_sub(header.len() + 2).max(0));
-    eprintln!("\n╭─{}{}╮", header, pad);
-    eprintln!("╰{}╯", "─".repeat(w));
-}
-
-fn print_result_box(title: &str, content: &str, max_chars: usize, w: usize) {
-    let header = format!(" {} ", title);
-    let pad = "─".repeat(w.saturating_sub(header.len() + 2).max(0));
-    eprintln!("╭─{}{}╮", header, pad);
-    let output = truncate_str(content, max_chars);
-    for line in output.lines() {
-        eprintln!("│ {:<width$} │", truncate_str(line, w - 4), width = w - 2);
-    }
-    eprintln!("╰{}╯", "─".repeat(w));
 }

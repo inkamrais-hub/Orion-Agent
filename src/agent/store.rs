@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Agent 配置模型 (持久化)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +49,7 @@ pub struct RollbackAction {
 
 /// Agent 配置持久化存储
 pub struct AgentStore {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl AgentStore {
@@ -90,12 +90,15 @@ impl AgentStore {
             CREATE INDEX IF NOT EXISTS idx_snapshots_session_turn ON session_snapshots(session_id, turn_index);
             ",
         )?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
     /// 列出全部 Agent 配置
     pub fn list(&self) -> crate::Result<Vec<AgentConfigModel>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let mut stmt = conn.prepare(
             "SELECT id, name, model, system_prompt, tools_json, mcp_servers_json,
                     max_turns, max_tool_calls, token_budget, thinking, reasoning_effort,
@@ -112,7 +115,10 @@ impl AgentStore {
 
     /// 按 ID 获取单个配置
     pub fn get(&self, id: &str) -> crate::Result<Option<AgentConfigModel>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let mut stmt = conn.prepare(
             "SELECT id, name, model, system_prompt, tools_json, mcp_servers_json,
                     max_turns, max_tool_calls, token_budget, thinking, reasoning_effort,
@@ -158,7 +164,10 @@ impl AgentStore {
 
     /// 更新指定 ID 的配置
     pub fn update(&self, id: &str, config: &AgentConfigModel) -> crate::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let now = chrono::Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE agents SET name=?1, model=?2, system_prompt=?3, tools_json=?4,
@@ -185,7 +194,10 @@ impl AgentStore {
 
     /// 删除指定 ID 的配置，返回是否真正删除了记录
     pub fn delete(&self, id: &str) -> crate::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let rows = conn.execute("DELETE FROM agents WHERE id = ?1", [id])?;
         Ok(rows > 0)
     }
@@ -218,7 +230,10 @@ impl AgentStore {
 
     /// 获取指定 session 的所有快照（按 turn_index DESC, created_at DESC）
     pub fn get_snapshots(&self, session_id: &str) -> crate::Result<Vec<SessionSnapshot>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let mut stmt = conn.prepare(
             "SELECT snapshot_id, session_id, agent_id, turn_index, tool_name,
                     target_path, content_before, created_at
@@ -243,22 +258,31 @@ impl AgentStore {
         session_id: &str,
         turn_index: u32,
     ) -> crate::Result<Vec<RollbackAction>> {
-        let snapshots = self.get_snapshots(session_id)?;
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
+        let mut stmt = conn.prepare(
+            "SELECT target_path, content_before
+             FROM session_snapshots
+             WHERE session_id = ?1 AND turn_index >= ?2
+             ORDER BY turn_index DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id, turn_index as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
 
-        // 只保留 turn_index >= target 的快照
-        let relevant: Vec<_> = snapshots
-            .into_iter()
-            .filter(|s| s.turn_index >= turn_index as i64)
-            .collect();
-
-        // 对每个 target_path 只取第一条（已按 turn_index DESC, created_at DESC 排序）
         let mut seen = std::collections::HashSet::new();
         let mut actions = Vec::new();
-        for snap in relevant {
-            if seen.insert(snap.target_path.clone()) {
+        for row in rows {
+            let (target_path, content_before) = row?;
+            if seen.insert(target_path.clone()) {
                 actions.push(RollbackAction {
-                    target_path: snap.target_path,
-                    content_before: snap.content_before,
+                    target_path,
+                    content_before,
                 });
             }
         }
@@ -271,13 +295,248 @@ impl AgentStore {
         session_id: &str,
         turn_index: u32,
     ) -> crate::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         conn.execute(
             "DELETE FROM session_snapshots
              WHERE session_id = ?1 AND turn_index >= ?2",
             rusqlite::params![session_id, turn_index],
         )?;
         Ok(())
+    }
+
+    // ── Async API (spawn_blocking) ─────────────────────
+
+    /// Async wrapper for list() - runs SQLite query on blocking thread pool
+    pub async fn list_async(&self) -> crate::Result<Vec<AgentConfigModel>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT id, name, model, system_prompt, tools_json, mcp_servers_json,
+                        max_turns, max_tool_calls, token_budget, thinking, reasoning_effort,
+                        created_at, updated_at
+                 FROM agents ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map([], Self::row_to_model)?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for get() - runs SQLite query on blocking thread pool
+    pub async fn get_async(&self, id: String) -> crate::Result<Option<AgentConfigModel>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT id, name, model, system_prompt, tools_json, mcp_servers_json,
+                        max_turns, max_tool_calls, token_budget, thinking, reasoning_effort,
+                        created_at, updated_at
+                 FROM agents WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query_map([id.as_str()], Self::row_to_model)?;
+            match rows.next() {
+                Some(row) => Ok(Some(row?)),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for create() - runs SQLite insert on blocking thread pool
+    pub async fn create_async(&self, config: AgentConfigModel) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "INSERT INTO agents (id, name, model, system_prompt, tools_json, mcp_servers_json,
+                                    max_turns, max_tool_calls, token_budget, thinking, reasoning_effort,
+                                    created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                rusqlite::params![
+                    config.id,
+                    config.name,
+                    config.model,
+                    config.system_prompt,
+                    config.tools_json,
+                    config.mcp_servers_json,
+                    config.max_turns,
+                    config.max_tool_calls,
+                    config.token_budget,
+                    config.thinking as i32,
+                    config.reasoning_effort,
+                    config.created_at,
+                    config.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for update() - runs SQLite update on blocking thread pool
+    pub async fn update_async(&self, id: String, config: AgentConfigModel) -> crate::Result<bool> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let now = chrono::Utc::now().to_rfc3339();
+            let rows = conn.execute(
+                "UPDATE agents SET name=?1, model=?2, system_prompt=?3, tools_json=?4,
+                        mcp_servers_json=?5, max_turns=?6, max_tool_calls=?7, token_budget=?8,
+                        thinking=?9, reasoning_effort=?10, updated_at=?11
+                 WHERE id=?12",
+                rusqlite::params![
+                    config.name,
+                    config.model,
+                    config.system_prompt,
+                    config.tools_json,
+                    config.mcp_servers_json,
+                    config.max_turns,
+                    config.max_tool_calls,
+                    config.token_budget,
+                    config.thinking as i32,
+                    config.reasoning_effort,
+                    now,
+                    id.as_str(),
+                ],
+            )?;
+            Ok(rows > 0)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for delete() - runs SQLite delete on blocking thread pool
+    pub async fn delete_async(&self, id: String) -> crate::Result<bool> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let rows = conn.execute("DELETE FROM agents WHERE id = ?1", [id.as_str()])?;
+            Ok(rows > 0)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for save_snapshot() - runs SQLite insert on blocking thread pool
+    pub async fn save_snapshot_async(&self, snapshot: SessionSnapshot) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "INSERT INTO session_snapshots
+                    (snapshot_id, session_id, agent_id, turn_index, tool_name, target_path, content_before, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    snapshot.snapshot_id,
+                    snapshot.session_id,
+                    snapshot.agent_id,
+                    snapshot.turn_index,
+                    snapshot.tool_name,
+                    snapshot.target_path,
+                    snapshot.content_before,
+                    snapshot.created_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for get_snapshots() - runs SQLite query on blocking thread pool
+    pub async fn get_snapshots_async(&self, session_id: String) -> crate::Result<Vec<SessionSnapshot>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT snapshot_id, session_id, agent_id, turn_index, tool_name,
+                        target_path, content_before, created_at
+                 FROM session_snapshots
+                 WHERE session_id = ?1
+                 ORDER BY turn_index DESC, created_at DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![session_id.as_str()], Self::row_to_snapshot)?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for rollback_to_turn() - runs SQLite query on blocking thread pool
+    pub async fn rollback_to_turn_async(
+        &self,
+        session_id: String,
+        turn_index: u32,
+    ) -> crate::Result<Vec<RollbackAction>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT target_path, content_before
+                 FROM session_snapshots
+                 WHERE session_id = ?1 AND turn_index >= ?2
+                 ORDER BY turn_index DESC, created_at DESC",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![session_id.as_str(), turn_index as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )?;
+
+            let mut seen = std::collections::HashSet::new();
+            let mut actions = Vec::new();
+            for row in rows {
+                let (target_path, content_before) = row?;
+                if seen.insert(target_path.clone()) {
+                    actions.push(RollbackAction {
+                        target_path,
+                        content_before,
+                    });
+                }
+            }
+            Ok(actions)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for cleanup_snapshots_after() - runs SQLite delete on blocking thread pool
+    pub async fn cleanup_snapshots_after_async(
+        &self,
+        session_id: String,
+        turn_index: u32,
+    ) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "DELETE FROM session_snapshots
+                 WHERE session_id = ?1 AND turn_index >= ?2",
+                rusqlite::params![session_id.as_str(), turn_index],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
     }
 
     // ── 内部辅助 ──────────────────────────────────────

@@ -20,6 +20,13 @@ pub struct SessionFileManager {
     trash_dir: PathBuf,
 }
 
+/// 验证 session_id 是否安全 (只允许字母数字、连字符、下划线)
+fn is_safe_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 impl SessionFileManager {
     /// 创建文件管理器
     pub fn new() -> Self {
@@ -58,6 +65,9 @@ impl SessionFileManager {
 
     /// 创建 Session 目录
     pub fn create_session_dir(&self, session_id: &str) -> crate::Result<PathBuf> {
+        if !is_safe_session_id(session_id) {
+            return Err(crate::Error::Agent(format!("Invalid session_id: '{}'", session_id)));
+        }
         let path = self.session_path(session_id);
         std::fs::create_dir_all(&path)?;
         Ok(path)
@@ -70,6 +80,9 @@ impl SessionFileManager {
 
     /// 软删除: 移动到 trash 目录
     pub fn soft_delete(&self, session_id: &str) -> crate::Result<()> {
+        if !is_safe_session_id(session_id) {
+            return Err(crate::Error::Agent(format!("Invalid session_id: '{}'", session_id)));
+        }
         let src = self.session_path(session_id);
         if !src.exists() {
             return Err(crate::Error::Tool(format!("Session 目录不存在: {}", session_id)));
@@ -89,6 +102,9 @@ impl SessionFileManager {
 
     /// 硬删除: 物理删除 trash 中的 Session
     pub fn hard_delete(&self, session_id: &str) -> crate::Result<()> {
+        if !is_safe_session_id(session_id) {
+            return Err(crate::Error::Agent(format!("Invalid session_id: '{}'", session_id)));
+        }
         let path = self.trash_dir.join(session_id);
         if path.exists() {
             std::fs::remove_dir_all(&path)?;
@@ -99,6 +115,9 @@ impl SessionFileManager {
 
     /// 恢复: 从 trash 移回 sessions
     pub fn restore(&self, session_id: &str) -> crate::Result<()> {
+        if !is_safe_session_id(session_id) {
+            return Err(crate::Error::Agent(format!("Invalid session_id: '{}'", session_id)));
+        }
         let src = self.trash_dir.join(session_id);
         if !src.exists() {
             return Err(crate::Error::Tool(format!("Session 不在回收站: {}", session_id)));
@@ -225,5 +244,46 @@ mod tests {
         assert!(fm.transcript_path(id).ends_with("transcript.jsonl"));
         assert!(fm.audit_path(id).ends_with("audit.jsonl"));
         assert!(fm.meta_path(id).ends_with("meta.json"));
+    }
+
+    #[test]
+    fn test_safe_session_id() {
+        assert!(is_safe_session_id("abc123"));
+        assert!(is_safe_session_id("session-2024-01-01"));
+        assert!(is_safe_session_id("test_session_123"));
+        assert!(is_safe_session_id("a"));  // single char
+    }
+
+    #[test]
+    fn test_unsafe_session_id_empty() {
+        assert!(!is_safe_session_id(""));
+    }
+
+    #[test]
+    fn test_unsafe_session_id_path_traversal() {
+        assert!(!is_safe_session_id("../../etc"));
+    }
+
+    #[test]
+    fn test_unsafe_session_id_slash() {
+        assert!(!is_safe_session_id("test/session"));
+    }
+
+    #[test]
+    fn test_unsafe_session_id_space() {
+        assert!(!is_safe_session_id("test session"));
+    }
+
+    #[test]
+    fn test_unsafe_session_id_too_long() {
+        assert!(!is_safe_session_id(&"a".repeat(200)));
+    }
+
+    #[test]
+    fn test_safe_session_id_max_length() {
+        // Exactly 128 chars should be allowed
+        assert!(is_safe_session_id(&"a".repeat(128)));
+        // 129 chars should be rejected
+        assert!(!is_safe_session_id(&"a".repeat(129)));
     }
 }

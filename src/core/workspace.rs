@@ -208,19 +208,23 @@ pub async fn init_workspace_guard(workspace_root: PathBuf) {
 /// 检查文件是否可以写入
 pub async fn can_write_file(path: &Path) -> Result<(), String> {
     let guard = WORKSPACE_GUARD.read().await;
-    if let Some(guard) = guard.as_ref() {
-        guard.can_write(path)
-    } else {
-        Ok(())
+    match guard.as_ref() {
+        Some(g) => g.can_write(path),
+        None => {
+            tracing::warn!("WorkspaceGuard not initialized, denying write to '{}' (fail-close)", path.display());
+            Err("WorkspaceGuard not initialized, denying operation (fail-close)".to_string())
+        }
     }
 }
 
 /// 检查命令是否安全
 pub async fn is_command_safe(cmd: &str) -> Result<(), String> {
     let guard = WORKSPACE_GUARD.read().await;
-    if let Some(guard) = guard.as_ref() {
-        guard.is_command_safe(cmd)
-    } else {
-        Ok(())
+    match guard.as_ref() {
+        Some(g) => g.is_command_safe(cmd),
+        None => {
+            tracing::warn!("WorkspaceGuard not initialized, denying command '{}' (fail-close)", cmd);
+            Err("WorkspaceGuard not initialized, denying operation (fail-close)".to_string())
+        }
     }
 }

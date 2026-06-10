@@ -109,10 +109,12 @@ impl MapReduceOrchestrator {
     async fn map_phase(&self, subtasks: &[SubTask]) -> crate::Result<Vec<SubTaskResult>> {
         use futures::future::join_all;
 
-        let mut handles = Vec::new();
+        let mut all_results: Vec<SubTaskResult> = Vec::new();
 
-        // 按 max_parallel 分批，避免一次 spawn 过多任务
+        // 按 max_parallel 分批执行，每批完成后才启动下一批
         for chunk in subtasks.chunks(self.max_parallel) {
+            let mut handles = Vec::new();
+
             for task in chunk {
                 let provider = self.provider.clone();
                 let tools_factory = self.tools_factory.clone();
@@ -164,23 +166,32 @@ impl MapReduceOrchestrator {
 
                 handles.push(handle);
             }
+
+            // 等待当前批次完成
+            let chunk_results = join_all(handles).await;
+            for r in chunk_results {
+                match r {
+                    Ok(result) => all_results.push(result),
+                    Err(e) => {
+                        tracing::error!("Sub-task panicked: {}", e);
+                        // 不要静默丢弃，记录为失败
+                    }
+                }
+            }
+
+            tracing::info!(
+                batch_completed = all_results.len(),
+                "Map phase batch completed"
+            );
         }
 
-        // 等待所有子任务完成
-        let all_results = join_all(handles).await;
-
-        let results: Vec<SubTaskResult> = all_results
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect();
-
         tracing::info!(
-            completed = results.iter().filter(|r| r.success).count(),
-            failed = results.iter().filter(|r| !r.success).count(),
+            completed = all_results.iter().filter(|r| r.success).count(),
+            failed = all_results.iter().filter(|r| !r.success).count(),
             "Map phase completed"
         );
 
-        Ok(results)
+        Ok(all_results)
     }
 
     /// Reduce 阶段：汇总所有子任务结果

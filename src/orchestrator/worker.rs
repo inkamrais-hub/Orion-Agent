@@ -5,6 +5,7 @@ use crate::tools::registry::ToolRegistry;
 use crate::core::cache::GlobalCache;
 use std::sync::Arc;
 use crate::agent::registry::AgentRegistry;
+use crate::core::r#loop::EventCallback;
 
 /// Worker 配置
 #[derive(Debug, Clone)]
@@ -52,7 +53,7 @@ impl Worker {
         let thinking_buf = std::sync::Mutex::new(String::new());
         let in_thinking = std::sync::Mutex::new(false);
 
-        let event_cb: crate::core::r#loop::EventCallback = Box::new(move |event| {
+        let event_cb: EventCallback = Arc::new(move |event| {
             match event {
                 crate::core::r#loop::LoopEvent::ThinkingDelta { text } => {
                     if text.is_empty() {

@@ -12,7 +12,7 @@ static API_KEY_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 
 /// 密码/密钥模式
 static PASSWORD_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(password|passwd|secret|token|key|api_key)\s*[=:]\s*\S+").unwrap()
+    Regex::new(r"(?i)(password|passwd|secret|token|api_key|api_secret|secret_key)\s*[=:]\s*\S+").unwrap()
 });
 
 /// 脱敏文本
@@ -33,9 +33,10 @@ pub fn redact_value(key: &str, value: &str) -> String {
     let lower_key = key.to_lowercase();
     if lower_key.contains("key") || lower_key.contains("password") 
         || lower_key.contains("secret") || lower_key.contains("token") {
-        // 只显示前 4 位
-        if value.len() > 4 {
-            format!("{}***", &value[..4])
+        // 只显示前 4 位 (char-based to avoid UTF-8 panic)
+        if value.chars().count() > 4 {
+            let prefix: String = value.chars().take(4).collect();
+            format!("{}***", prefix)
         } else {
             "***".to_string()
         }

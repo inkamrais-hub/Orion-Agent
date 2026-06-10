@@ -118,11 +118,14 @@ impl Tool for EditTool {
             }
         }
 
+        // 标准化 new_string 中的换行符，防止 CRLF 恢复时产生 \r\r\n
+        let new_string = new_string.replace("\r\n", "\n").replace('\r', "\n");
+
         // 执行替换
         let new_content = if replace_all {
-            normalized.replace(&*old_normalized, new_string)
+            normalized.replace(&*old_normalized, &new_string)
         } else {
-            normalized.replacen(&*old_normalized, new_string, 1)
+            normalized.replacen(&*old_normalized, &new_string, 1)
         };
 
         // 写回前还原 CRLF
@@ -152,7 +155,7 @@ impl Tool for EditTool {
         // ── 生成变更预览 ──
         let preview = format!("--- old\n+++ new\n- {}\n+ {}",
             truncate_preview(old_string),
-            truncate_preview(new_string),
+            truncate_preview(&new_string),
         );
 
         Ok(ToolResult {
@@ -165,7 +168,7 @@ impl Tool for EditTool {
                 "path": path,
                 "replacements": actual_replacements,
                 "old_preview": truncate_preview(old_string),
-                "new_preview": truncate_preview(new_string),
+                "new_preview": truncate_preview(&new_string),
             })),
         })
     }

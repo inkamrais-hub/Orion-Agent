@@ -31,7 +31,7 @@ async fn main() -> orion_agent::Result<()> {
     // ============================================================
     // Step 3: Provider (DeepSeek)
     // ============================================================
-    let provider = OpenAICompatProvider::from_env();
+    let provider = OpenAICompatProvider::from_env()?;
 
     // ============================================================
     // Step 4: 循环配置

@@ -19,6 +19,8 @@ pub struct ToolRegistry {
     activated: Arc<std::sync::Mutex<HashSet<String>>>,
     /// 是否启用延迟装载模式
     lazy_mode: bool,
+    /// 统一存储（用于快照等持久化操作）
+    store: Option<Arc<crate::session::UnifiedStore>>,
 }
 
 impl Clone for ToolRegistry {
@@ -29,6 +31,7 @@ impl Clone for ToolRegistry {
                 self.activated.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             )),
             lazy_mode: self.lazy_mode,
+            store: self.store.clone(),
         }
     }
 }
@@ -39,7 +42,13 @@ impl ToolRegistry {
             tools: HashMap::new(),
             activated: Arc::new(std::sync::Mutex::new(HashSet::new())),
             lazy_mode: false,
+            store: None,
         }
+    }
+
+    /// 设置统一存储（用于快照等持久化操作）
+    pub fn set_store(&mut self, store: Arc<crate::session::UnifiedStore>) {
+        self.store = Some(store);
     }
 
     /// 启用延迟装载模式
@@ -185,7 +194,7 @@ impl ToolRegistry {
         // ── 后置拦截器：保存快照到 SQLite ──
         if (name == "write" || name == "edit") && !result.is_error {
             if let Some(ref path_str) = snapshot_path {
-                save_file_snapshot(ctx, name, path_str, content_before);
+                save_file_snapshot(ctx, name, path_str, content_before, self.store.as_deref()).await;
             }
         }
 
@@ -209,44 +218,73 @@ impl ToolRegistry {
 fn normalize_and_validate_path(path_str: &str, working_dir: &str) -> crate::Result<String> {
     let path = Path::new(path_str);
 
-    // 1. 规范化路径组件（移除 . 和 ..）
-    let mut components = Vec::new();
+    // 1. 规范化路径组件（移除 . 和 ..，保留 Prefix 和 RootDir）
+    let mut normalized = PathBuf::new();
     for comp in path.components() {
         match comp {
-            Component::Normal(s) => components.push(s.to_string_lossy().to_string()),
-            Component::ParentDir => { components.pop(); }
+            Component::Normal(_) | Component::Prefix(_) | Component::RootDir => {
+                normalized.push(comp.as_os_str());
+            }
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(crate::Error::Tool(format!(
+                        "Path traversal detected: path '{}' escapes working directory",
+                        path_str
+                    )));
+                }
+            }
             Component::CurDir => {} // 跳过 .
-            _ => {} // 跳过 RootDir, Prefix 等系统组件
         }
     }
 
-    // 2. 统一路径分隔符为 /
-    let normalized = components.join("/");
+    // 2. 检查路径中是否含有 .. 组件 (路径穿越防护)
+    if normalized.components().any(|c| c.as_os_str() == "..") {
+        return Err(crate::Error::Tool(format!(
+            "Path traversal detected: path escapes working directory"
+        )));
+    }
 
-    // 3. 绝对路径逃逸检查
+    // 3. 统一路径分隔符为 /
+    let normalized_str = path_to_forward_slash(&normalized);
+
+    // 4. 绝对路径逃逸检查
     if path.is_absolute() {
         let work = PathBuf::from(working_dir);
-        let work_str = work.to_string_lossy().to_lowercase().replace('\\', "/");
-        let norm_lower = normalized.to_lowercase();
+        let work_str = path_to_forward_slash(&work).to_lowercase();
+        let norm_lower = normalized_str.to_lowercase();
         if !norm_lower.starts_with(&work_str) {
             return Err(crate::Error::Tool(format!(
                 "安全拦截: 路径 '{}' 超出工作区范围 (working_dir: {})",
                 path_str, working_dir
             )));
         }
+        // 绝对路径且通过验证，尝试返回 canonicalized 路径
+        if let Ok(canonical) = normalized.canonicalize() {
+            return Ok(path_to_forward_slash(&canonical));
+        }
+        return Ok(normalized_str);
     }
 
-    // 4. 检查规范化后的相对路径是否存在越权逃逸
-    //    例如: "../../etc/passwd" 规范化后变成空或 "../.." 开头
-    //    对于相对路径，需要确保规范化后不会逃逸出工作区
-    if !path.is_absolute() && normalized.starts_with("..") {
+    // 5. 相对路径不再以 .. 开头即可
+    //    (ParentDir pop 失败已在循环中拦截，此处做额外兜底)
+    if normalized.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(crate::Error::Tool(format!(
             "安全拦截: 路径 '{}' 规范化后逃逸出工作区范围",
             path_str
         )));
     }
 
-    Ok(normalized)
+    // 相对路径尝试 canonicalize
+    if let Ok(canonical) = normalized.canonicalize() {
+        return Ok(path_to_forward_slash(&canonical));
+    }
+
+    Ok(normalized_str)
+}
+
+/// 将 PathBuf 转换为正斜杠分隔的字符串
+fn path_to_forward_slash(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 // ============================================================
@@ -254,16 +292,25 @@ fn normalize_and_validate_path(path_str: &str, working_dir: &str) -> crate::Resu
 // ============================================================
 
 /// 将文件快照保存到 SQLite（异步 fire-and-forget）
-fn save_file_snapshot(
+async fn save_file_snapshot(
     ctx: &ToolContext,
     tool_name: &str,
     target_path: &str,
     content_before: Option<String>,
+    store: Option<&crate::session::UnifiedStore>,
 ) {
     // 跳过空 session（非 API 调用场景可能没有 session_id）
     if ctx.session_id.is_empty() {
         return;
     }
+
+    let store = match store {
+        Some(s) => s,
+        None => {
+            tracing::warn!("No UnifiedStore available for snapshot, skipping");
+            return;
+        }
+    };
 
     let snapshot = crate::agent::store::SessionSnapshot {
         snapshot_id: uuid::Uuid::new_v4().to_string(),
@@ -276,17 +323,79 @@ fn save_file_snapshot(
         created_at: chrono::Utc::now().to_rfc3339(),
     };
 
-    let db_path = crate::config::data_dir_path().join("agents.db");
+    // 异步写入失败只 warn 不阻断主流程
+    if let Err(e) = store.save_session_snapshot(&snapshot).await {
+        tracing::warn!(error = %e, "Failed to save file snapshot");
+    }
+}
 
-    // 同步写入失败只 warn 不阻断主流程
-    match crate::agent::store::AgentStore::new(&db_path) {
-        Ok(store) => {
-            if let Err(e) = store.save_snapshot(&snapshot) {
-                tracing::warn!(error = %e, "Failed to save file snapshot");
-            }
+// ============================================================
+//  Tests: 路径规范化与安全校验
+// ============================================================
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn test_absolute_path_preserved() {
+        // Absolute paths within workspace should pass validation
+        let result = normalize_and_validate_path("/home/user/project/src/main.rs", "/home/user/project");
+        assert!(result.is_ok());
+        let normalized = result.unwrap();
+        assert!(normalized.starts_with("/home/user/project"));
+    }
+
+    #[test]
+    fn test_path_traversal_blocked() {
+        // foo/../../etc/passwd should be blocked (escapes via ..)
+        let result = normalize_and_validate_path("foo/../../etc/passwd", "/home/user/project");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_relative_path_within_workspace() {
+        let result = normalize_and_validate_path("src/main.rs", "/home/user/project");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dotdot_escaping_blocked() {
+        let result = normalize_and_validate_path("../../etc/passwd", "/home/user/project");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_single_dotdot_escaping_blocked() {
+        // A single .. that escapes should also be blocked
+        let result = normalize_and_validate_path("../../../etc/passwd", "/home/user/project");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dot_components_stripped() {
+        // Current-dir components (.) should be stripped
+        let result = normalize_and_validate_path("./src/./main.rs", "/home/user/project");
+        assert!(result.is_ok());
+        let normalized = result.unwrap();
+        assert!(!normalized.contains("./"));
+    }
+
+    #[test]
+    fn test_absolute_path_outside_workspace_blocked() {
+        // Absolute path outside working directory should be blocked
+        #[cfg(unix)]
+        {
+            let result = normalize_and_validate_path("/etc/passwd", "/home/user/project");
+            assert!(result.is_err());
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to open agent store for snapshot");
+        #[cfg(windows)]
+        {
+            let result = normalize_and_validate_path(
+                "C:\\Windows\\System32\\config",
+                "C:\\Users\\test\\project",
+            );
+            assert!(result.is_err());
         }
     }
 }

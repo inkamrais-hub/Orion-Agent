@@ -27,7 +27,7 @@ async fn main() -> orion_agent::Result<()> {
     orion_agent::core::workspace::init_workspace_guard(workspace_root).await;
 
     // 2. 创建 Provider
-    let provider: Arc<dyn Provider> = Arc::new(OpenAICompatProvider::from_env());
+    let provider: Arc<dyn Provider> = Arc::new(OpenAICompatProvider::from_env()?);
     let cache = GlobalCache::new(500, 300, 5000);
 
     // 5. 创建 Agent Registry

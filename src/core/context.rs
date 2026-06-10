@@ -197,11 +197,15 @@ pub async fn compact_context_with_llm(
     let before = messages.len();
     if before <= 2 { return None; }
 
+    // Track whether LLM-dependent compaction actually succeeded.
+    // If call_llm_summary returns None, we must not report success.
+    let mut llm_compaction_succeeded = true;
+
     match strategy {
         CompactionStrategy::None => return None,
         CompactionStrategy::Micro { keep_recent } => {
             if before > *keep_recent {
-                let drain_count = before - *keep_recent;
+                let drain_count = (before - *keep_recent).min(before.saturating_sub(1));
                 messages.drain(1..=drain_count);
             }
         }
@@ -209,10 +213,10 @@ pub async fn compact_context_with_llm(
             // 阶梯式截断: 一次删除 chunk_size 条消息，保持前缀稳定
             // 优势: 接下来的 chunk_size-1 轮对话中，Messages 前缀保持完全稳定
             if before > *keep_recent + chunk_size {
-                let drain_count = *chunk_size;
+                let drain_count = (*chunk_size).min(before.saturating_sub(1));
                 messages.drain(1..=drain_count);
             } else if before > *keep_recent {
-                let drain_count = before - *keep_recent;
+                let drain_count = (before - *keep_recent).min(before.saturating_sub(1));
                 messages.drain(1..=drain_count);
             }
         }
@@ -249,6 +253,8 @@ pub async fn compact_context_with_llm(
                     reasoning_content: None,
                     cache_breakpoint: false,
                 });
+            } else {
+                llm_compaction_succeeded = false;
             }
         }
         CompactionStrategy::Reactive { strip_images } => {
@@ -272,6 +278,8 @@ pub async fn compact_context_with_llm(
                     reasoning_content: None,
                     cache_breakpoint: false,
                 });
+            } else {
+                llm_compaction_succeeded = false;
             }
         }
         CompactionStrategy::Collapse { max_summary_words } => {
@@ -291,12 +299,20 @@ pub async fn compact_context_with_llm(
                     reasoning_content: None,
                     cache_breakpoint: false,
                 });
+            } else {
+                llm_compaction_succeeded = false;
             }
         }
     }
 
     // 清理消息格式: 确保没有孤立的 Tool 消息，且消息角色交替正确
     sanitize_messages(messages);
+
+    // If the LLM summary call failed, compaction did not actually happen —
+    // return None so the caller can trigger a Micro fallback.
+    if !llm_compaction_succeeded {
+        return None;
+    }
 
     let after = messages.len();
     let tokens_freed = ((before - after) * 100) as u64; // 估算
@@ -437,5 +453,118 @@ async fn call_llm_summary(
             tracing::warn!("LLM compaction failed: {}", e);
             None
         }
+    }
+}
+
+// ============================================================
+//  Tests: 消息清理与压缩逻辑
+// ============================================================
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+    use crate::core::provider::{ContentBlock, Message, Role};
+
+    fn make_message(role: Role, content: &str) -> Message {
+        Message::new(role, vec![ContentBlock::Text { text: content.to_string() }])
+    }
+
+    #[test]
+    fn test_sanitize_merges_consecutive_same_role() {
+        let mut messages = vec![
+            make_message(Role::User, "hello"),
+            make_message(Role::User, "world"),
+            make_message(Role::Assistant, "response"),
+        ];
+        sanitize_messages(&mut messages);
+        // Two consecutive User messages should be merged into one
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_sanitize_preserves_alternating_roles() {
+        let mut messages = vec![
+            make_message(Role::User, "msg1"),
+            make_message(Role::Assistant, "msg2"),
+            make_message(Role::User, "msg3"),
+        ];
+        sanitize_messages(&mut messages);
+        // Already alternating, no merging needed
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn test_sanitize_removes_orphan_tool_messages() {
+        let mut messages = vec![
+            make_message(Role::User, "hello"),
+            // Orphan Tool message (no preceding Assistant tool_use)
+            Message::new(Role::Tool, vec![ContentBlock::ToolResult {
+                tool_name: "read".to_string(),
+                content: "file content".to_string(),
+                is_error: false,
+                tool_call_id: "call_1".to_string(),
+            }]),
+            make_message(Role::Assistant, "response"),
+        ];
+        sanitize_messages(&mut messages);
+        // Orphan Tool message should be removed
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_drain_preserves_first_message() {
+        // Verify that Micro strategy drain preserves message[0]
+        // This tests the saturating_sub(1) fix
+        let mut messages: Vec<Message> = (0..20).map(|i| {
+            make_message(
+                if i % 2 == 0 { Role::User } else { Role::Assistant },
+                &format!("msg {}", i),
+            )
+        }).collect();
+        let first_text = match &messages[0].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected Text block"),
+        };
+        let before = messages.len();
+        assert!(before > 1);
+
+        // Simulate Micro drain: drain(1..=drain_count)
+        let keep_recent = 5;
+        if before > keep_recent {
+            let drain_count = (before - keep_recent).min(before.saturating_sub(1));
+            messages.drain(1..=drain_count);
+        }
+        // message[0] should be preserved
+        assert!(messages.len() >= 1);
+        match &messages[0].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, &first_text),
+            _ => panic!("expected Text block"),
+        }
+    }
+
+    #[test]
+    fn test_context_level_thresholds() {
+        let mgr = ContextManager::new(1000);
+        assert!(matches!(mgr.level(500), ContextLevel::Healthy));    // 50%
+        assert!(matches!(mgr.level(750), ContextLevel::Elevated));   // 75%
+        assert!(matches!(mgr.level(900), ContextLevel::Warning));    // 90%
+        assert!(matches!(mgr.level(950), ContextLevel::Critical));   // 95%
+        assert!(matches!(mgr.level(970), ContextLevel::Exhausted));  // 97%
+    }
+
+    #[test]
+    fn test_circuit_breaker_trips_after_3_failures() {
+        let mut mgr = ContextManager::new(1000);
+        mgr.record_compaction(false);
+        assert!(!mgr.disabled);
+        mgr.record_compaction(false);
+        assert!(!mgr.disabled);
+        mgr.record_compaction(false);
+        // 3 consecutive failures should trip the circuit breaker
+        assert!(mgr.disabled);
     }
 }

@@ -14,7 +14,7 @@ pub struct ToolCacheKey {
 pub struct CacheEntry {
     pub value: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    pub hit_count: u64,
+    pub hit_count: Arc<AtomicU64>,
 }
 
 pub struct L1ToolCache {
@@ -31,11 +31,14 @@ impl L1ToolCache {
         }
     }
     pub async fn get(&self, key: &ToolCacheKey) -> Option<String> {
-        self.inner.get(key).await.map(|entry| entry.value.clone())
+        self.inner.get(key).await.map(|entry| {
+            entry.hit_count.fetch_add(1, Ordering::Relaxed);
+            entry.value.clone()
+        })
     }
     pub async fn set(&self, key: ToolCacheKey, value: String) {
         self.inner.insert(key, CacheEntry {
-            value, created_at: chrono::Utc::now(), hit_count: 0,
+            value, created_at: chrono::Utc::now(), hit_count: Arc::new(AtomicU64::new(0)),
         }).await;
     }
     pub async fn invalidate(&self, key: &ToolCacheKey) {
@@ -175,6 +178,11 @@ impl CacheBreakTracker {
     /// 记录缓存失效事件
     pub fn record(&mut self, vector: CacheBreakVector) {
         self.breaks.push((vector, std::time::Instant::now()));
+        // Auto-cleanup when breaks vector grows too large to prevent unbounded memory growth
+        if self.breaks.len() > 1000 {
+            // Retain only entries from the last 5 minutes
+            self.cleanup(std::time::Duration::from_secs(300));
+        }
     }
 
     /// 获取最近的缓存失效事件
@@ -270,6 +278,11 @@ impl L2ContextCache {
     /// 按 system prompt hash 获取缓存的上下文快照
     pub async fn get_by_prompt(&self, prompt_hash: u64) -> Option<ContextSnapshot> {
         self.prompt_cache.get(&prompt_hash).await
+    }
+
+    /// 返回 L2 缓存中的总条目数 (inner + prompt_cache)
+    pub fn entry_count(&self) -> u64 {
+        self.inner.entry_count() + self.prompt_cache.entry_count()
     }
 
     /// 使用 CacheBreakTracker 检查缓存是否需要失效
@@ -446,7 +459,7 @@ impl GlobalCache {
             l2_hits: self.l2_hits.load(Ordering::Relaxed),
             l2_misses: self.l2_misses.load(Ordering::Relaxed),
             l1_entries: self.l1.entry_count(),
-            l2_entries: 0,
+            l2_entries: self.l2.entry_count(),
             tracked_paths: self.path_tracker.paths.len(),
             prompt_cache_hits: self.prompt_cache_hits.load(Ordering::Relaxed),
             prompt_cache_tokens_saved: self.prompt_cache_tokens_saved.load(Ordering::Relaxed),
@@ -460,7 +473,7 @@ impl GlobalCache {
             l2_hits: self.l2_hits.load(Ordering::Relaxed),
             l2_misses: self.l2_misses.load(Ordering::Relaxed),
             l1_entries: self.l1.entry_count(),
-            l2_entries: 0,
+            l2_entries: self.l2.entry_count(),
         }
     }
 
@@ -534,37 +547,20 @@ impl CacheReport {
 
 fn extract_path_from_input(tool_name: &str, input: &serde_json::Value) -> Option<String> {
     match tool_name {
-        "read" | "write" => input.get("path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        "read" | "write" | "edit" | "glob" | "grep"
+        | "symbol_search" | "find_callers" | "skeleton" => {
+            // Try "path" first, then "directory" for directory-based tools
+            input.get("path").and_then(|v| v.as_str()).map(|s| s.to_string())
+                .or_else(|| input.get("directory").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        }
         _ => None,
     }
 }
 
 pub fn compute_input_hash(tool_name: &str, input: &serde_json::Value) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tool_name.hash(&mut hasher);
-    // 使用规范化 JSON 字符串 (sort keys) 确保相同语义的 JSON 产生相同 hash
-    normalize_json(input).hash(&mut hasher);
-    hasher.finish()
-}
-
-/// 规范化 JSON 值 (递归排序 object keys)
-fn normalize_json(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut sorted: Vec<(&String, &serde_json::Value)> = map.iter().collect();
-            sorted.sort_by_key(|(k, _)| k.as_str());
-            let parts: Vec<String> = sorted.iter()
-                .map(|(k, v)| format!("{}:{}", k, normalize_json(v)))
-                .collect();
-            format!("{{{}}}", parts.join(","))
-        }
-        serde_json::Value::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(|v| normalize_json(v)).collect();
-            format!("[{}]", parts.join(","))
-        }
-        _ => serde_json::to_string(value).unwrap_or_default(),
-    }
+    // Delegate to L1ToolCache's version which applies full normalization
+    // (path normalization, default value completion, JSON key sorting)
+    L1ToolCache::compute_input_hash(tool_name, input)
 }
 
 // ============================================================

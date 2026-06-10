@@ -3,6 +3,7 @@
 //! 终端旋转进度条 + 状态消息
 
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -11,7 +12,7 @@ pub struct ProgressBar {
     message: String,
     spinner_idx: usize,
     start_time: std::time::Instant,
-    finished: bool,
+    finished: AtomicBool,
 }
 
 impl ProgressBar {
@@ -20,7 +21,7 @@ impl ProgressBar {
             message: msg.to_string(),
             spinner_idx: 0,
             start_time: std::time::Instant::now(),
-            finished: false,
+            finished: AtomicBool::new(false),
         };
         pb.render();
         pb
@@ -47,6 +48,9 @@ impl ProgressBar {
 
     /// 完成
     pub fn finish(&self) {
+        if self.finished.swap(true, Ordering::SeqCst) {
+            return; // 已经 finish 过了
+        }
         let elapsed = self.start_time.elapsed().as_millis();
         eprint!("\r✓ {} ({}ms)\n", self.message, elapsed);
         let _ = io::stderr().flush();
@@ -54,6 +58,9 @@ impl ProgressBar {
 
     /// 完成并标记失败
     pub fn finish_with_error(&self, err: &str) {
+        if self.finished.swap(true, Ordering::SeqCst) {
+            return; // 已经 finish 过了
+        }
         let elapsed = self.start_time.elapsed().as_millis();
         eprint!("\r✗ {} — {} ({}ms)\n", self.message, err, elapsed);
         let _ = io::stderr().flush();
@@ -62,10 +69,8 @@ impl ProgressBar {
 
 impl Drop for ProgressBar {
     fn drop(&mut self) {
-        if !self.finished {
-            self.finished = true;
-            self.finish();
-        }
+        // finish() 内部的 AtomicBool::swap 保证不会重复输出
+        self.finish();
     }
 }
 
@@ -83,7 +88,9 @@ impl StepProgress {
     }
 
     pub fn step(&mut self, msg: &str) {
-        self.current += 1;
+        if self.current < self.total {
+            self.current += 1;
+        }
         eprint!("\r[{}/{}] {}  ", self.current, self.total, msg);
         let _ = io::stderr().flush();
     }

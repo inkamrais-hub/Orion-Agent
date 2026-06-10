@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use crate::audit::{AuditEvent as GlobalAuditEvent, AUDIT_LOGGER};
-use futures::future::join_all;
 use tracing::{debug, info};
 
 use crate::core::context::{CompactionStrategy, CompactionResult};
 use crate::core::provider::{
     ContentBlock, Message, ProviderRequest, Role, TokenBudget, UsageInfo,
 };
-use crate::core::hooks::{HookEngine, HookResult};
-use crate::core::execpolicy::{ExecPolicy, Decision as PolicyDecision};
+use crate::core::hooks::HookEngine;
+use crate::core::execpolicy::ExecPolicy;
 use crate::session::rollout::RolloutRecorder;
 use crate::core::goal::GoalManager;
 use crate::tools::registry::ToolRegistry;
@@ -45,8 +44,8 @@ pub enum LoopEvent {
     Error(String),
 }
 
-/// 事件回调类型
-pub type EventCallback = Box<dyn Fn(&LoopEvent) + Send + Sync>;
+/// 事件回调
+pub type EventCallback = Arc<dyn Fn(&LoopEvent) + Send + Sync>;
 
 /// 安全截断字符串 (按字符边界，不 panic)
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
@@ -421,15 +420,15 @@ impl Default for SimpleLoopConfig {
 ///
 /// 消除 11 个散落参数的混乱，使用 Default 只设置需要的字段
 #[derive(Default)]
-pub struct SimpleLoopContext<'a> {
+pub struct SimpleLoopContext {
     pub event_callback: Option<EventCallback>,
     pub registry: Option<std::sync::Arc<crate::agent::registry::AgentRegistry>>,
     pub hook_engine: Option<std::sync::Arc<tokio::sync::Mutex<HookEngine>>>,
-    pub exec_policy: Option<&'a ExecPolicy>,
-    pub rollout: Option<&'a mut RolloutRecorder>,
-    pub goal_manager: Option<&'a mut GoalManager>,
+    pub exec_policy: Option<std::sync::Arc<ExecPolicy>>,
+    pub rollout: Option<std::sync::Arc<tokio::sync::Mutex<RolloutRecorder>>>,
+    pub goal_manager: Option<std::sync::Arc<tokio::sync::Mutex<GoalManager>>>,
     pub images: Option<Vec<ContentBlock>>,
-    pub guardrails: Option<&'a crate::core::guardrail::GuardrailChain>,
+    pub guardrails: Option<std::sync::Arc<crate::core::guardrail::GuardrailChain>>,
 }
 
 /// 循环状态封装 — 集中管理 run_simple_loop 的所有可变状态
@@ -586,21 +585,21 @@ impl<'a> ContextManager<'a> {
     }
 }
 
-pub async fn run_simple_loop<'a>(
+pub async fn run_simple_loop(
     provider: &dyn crate::core::provider::Provider,
     tools: &ToolRegistry,
     cache: &crate::core::cache::GlobalCache,
     config: &SimpleLoopConfig,
     user_input: &str,
-    ctx: SimpleLoopContext<'a>,
+    ctx: SimpleLoopContext,
 ) -> LoopOutcome {
     let SimpleLoopContext {
         event_callback,
         registry,
         hook_engine,
         exec_policy,
-        mut rollout,
-        mut goal_manager,
+        rollout,
+        goal_manager,
         images,
         guardrails,
     } = ctx;
@@ -628,13 +627,15 @@ pub async fn run_simple_loop<'a>(
     });
 
     // Rollout: 记录用户输入
-    if let Some(ref mut rec) = rollout {
-        let _ = rec.user_input(user_input);
+    if let Some(ref rec) = rollout {
+        let mut guard = rec.lock().await;
+        let _ = guard.user_input(user_input);
     }
 
     // Goal: 创建目标
-    if let Some(ref mut gm) = goal_manager {
-        let gid = gm.create("agent task", token_budget / 2);
+    if let Some(ref gm) = goal_manager {
+        let mut gm_guard = gm.lock().await;
+        let gid = gm_guard.create("agent task", token_budget / 2);
         state.set_goal_id(gid);
     }
 
@@ -771,13 +772,15 @@ pub async fn run_simple_loop<'a>(
 
         if !has_tool_use {
             // Rollout: 记录 LLM 回复
-            if let Some(ref mut rec) = rollout {
-                let _ = rec.llm_response(&acc_text, None);
+            if let Some(ref rec) = rollout {
+                let mut guard = rec.lock().await;
+                let _ = guard.llm_response(&acc_text, None);
             }
 
             // Goal: 标记完成
-            if let (Some(ref mut gm), Some(gid)) = (goal_manager.as_deref_mut(), state.goal_id()) {
-                let _ = gm.update(gid, crate::core::goal::GoalStatus::Completed);
+            if let (Some(ref gm), Some(gid)) = (&goal_manager, state.goal_id()) {
+                let mut gm_guard = gm.lock().await;
+                let _ = gm_guard.update(gid, crate::core::goal::GoalStatus::Completed);
             }
 
             return LoopOutcome::Completed { message: acc_text, usage: state.usage_clone() };
@@ -785,302 +788,146 @@ pub async fn run_simple_loop<'a>(
 
         // 处理工具调用 (含 StepObserver 观察 + 并行执行)
         // 判断是否可以并行执行 (所有工具都是只读)
-        // 构建工具执行器配置 (静态 execute_single_tool 所需, 每轮重新构造)
-        let exec_config = crate::core::tool_executor::ToolExecutorConfig::basic(
-            config.session_id.clone(), config.agent_id.clone(), registry.clone(),
+        let pending_calls: Vec<crate::core::tool_executor::PendingToolCall> = acc_tools
+            .iter()
+            .map(|(id, name, input)| {
+                crate::core::tool_executor::PendingToolCall::new(id, name, input.clone())
+            })
+            .collect();
+
+        let mut executor_config = crate::core::tool_executor::ToolExecutorConfig::basic(
+            config.session_id.clone(),
+            config.agent_id.clone(),
+            registry.clone(),
         );
+        executor_config.working_dir = std::env::current_dir().ok().map(|p| p.display().to_string());
+        executor_config.turn_number = Some(state.turn());
+        executor_config.guardrails = guardrails.as_ref().map(|g| (**g).clone());
+        executor_config.hook_engine = hook_engine.clone();
+        executor_config.exec_policy = exec_policy.as_ref().map(|p| (**p).clone());
+        executor_config.event_callback = event_callback.clone();
+        executor_config.rollout = rollout.clone();
+
+        let executor = Arc::new(crate::core::tool_executor::ToolExecutor::new(
+            Arc::new((*tools).clone()),
+            Arc::new((*cache).clone()),
+            executor_config,
+            state.observer.clone(),
+        ));
+
+        let turn_ctx = crate::core::guardrail::TurnContext {
+            turn_number: state.turn(),
+            tool_call_count: state.tool_call_count,
+            total_input_tokens: state.total_usage.input_tokens,
+            total_output_tokens: state.total_usage.output_tokens,
+        };
+
         let all_readonly = crate::core::tool_executor::are_tools_readonly(&acc_tools);
 
-        if all_readonly && acc_tools.len() > 1 {
-            // 并行执行只读工具
-            let mut handles = Vec::new();
-            for (tool_call_id, tool_name, input) in &acc_tools {
-                state.increment_tool_call();
+        let call_count = pending_calls.len() as u64;
+        state.tool_call_count += call_count;
+        if state.exceeds_max_tool_calls(max_tool_calls) {
+            return LoopOutcome::GuardrailDenied {
+                reason: format!("Max tool calls ({}) exceeded", max_tool_calls)
+            };
+        }
 
-                // 护栏检查 (使用 helper 消除代码重复)
-                {
-                    let turn_ctx = crate::core::guardrail::TurnContext {
-                        turn_number: state.turn(),
-                        tool_call_count: state.tool_call_count,
-                        total_input_tokens: state.total_usage.input_tokens,
-                        total_output_tokens: state.total_usage.output_tokens,
-                    };
-                    if let Some(msg) = check_guardrail_tool(
-                        guardrails, &turn_ctx, tool_name, input, tool_call_id
-                    ).await {
-                        state.add_message(msg);
-                        continue;
-                    }
-                }
-
-                if let Some(ref cb) = event_callback {
-                    cb(&LoopEvent::ToolStart {
-                        tool_name: tool_name.clone(),
-                        tool_id: tool_call_id.clone(),
-                        input: input.clone(),
-                    });
-                }
-
-                let tc_id = tool_call_id.clone();
-                let tn = tool_name.clone();
-                let inp = input.clone();
-                let turn_for_task = state.turn();
-                let registry_clone = registry.clone();
-
-                handles.push(async move {
-                    let ec = crate::core::tool_executor::ToolExecutorConfig::basic(
-                        config.session_id.clone(), config.agent_id.clone(), registry_clone,
-                    );
-                    let output = crate::core::tool_executor::ToolExecutor::execute_single_tool(
-                        tools, cache, &ec, &tn, &inp, turn_for_task,
-                    ).await;
-                    (tc_id, tn, output.result, output.duration_ms)
-                });
-            }
-
-            // 等待所有并行工具完成
-            let results = join_all(handles).await;
-            let mut early_stop_reason: Option<String> = None;
-            for (tc_id, tn, mut result, elapsed) in results {
-                // StepObserver: 评估并行工具结果
-                let observe_action = {
-                    let mut obs = state.observer.lock().await;
-                    obs.observe(&tn, &mut result)
-                };
-                match observe_action {
-                    ObserveAction::Continue => {}
-                    ObserveAction::Retry => {
-                        // 并行已完成，无法单个重试，跳过
-                        info!("StepObserver retry suggested for '{}' but skipped in parallel mode", tn);
-                    }
-                    ObserveAction::Replan { hint } => {
-                        info!("StepObserver replan from parallel tool '{}': {}", tn, hint);
-                        state.add_message(Message {
-                            role: Role::System,
-                            content: vec![ContentBlock::Text { text: hint }],
-                            reasoning_content: None,
-                            cache_breakpoint: false,
-                        });
-                    }
-                    ObserveAction::EarlyStop { reason } => {
-                        info!("StepObserver early stop from parallel tool '{}': {}", tn, reason);
-                        early_stop_reason = Some(reason);
-                    }
-                }
-
-                if let Some(ref cb) = event_callback {
-                    cb(&LoopEvent::ToolEnd {
-                        tool_name: tn.clone(),
-                        tool_id: tc_id.clone(),
-                        result: result.content.clone(),
-                        is_error: result.is_error,
-                        duration_ms: elapsed,
-                    });
-                }
-                state.add_message(build_tool_result_message(
-                    &tc_id, &tn, &result.content, result.is_error,
-                ));
-            }
-            // EarlyStop: 提前终止整个循环
-            if let Some(reason) = early_stop_reason {
-                return LoopOutcome::Completed {
-                    message: reason,
-                    usage: state.usage_clone(),
-                };
-            }
-            state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::ToolResultChange);
-            debug!("CacheBreak: ToolResultChange (parallel batch)");
+        let execution_outcomes = if all_readonly && acc_tools.len() > 1 {
+            executor.clone().execute_parallel(pending_calls, &turn_ctx).await
         } else {
-            // 串行执行 (含 StepObserver)
-        for (tool_call_id, tool_name, input) in &acc_tools {
-            state.increment_tool_call();
+            executor.execute_serial(pending_calls, &turn_ctx).await
+        };
 
-            // 护栏检查 (使用 helper 消除代码重复)
-            {
-                let turn_ctx = crate::core::guardrail::TurnContext {
-                    turn_number: state.turn(),
-                    tool_call_count: state.tool_call_count,
-                    total_input_tokens: state.total_usage.input_tokens,
-                    total_output_tokens: state.total_usage.output_tokens,
-                };
-                if let Some(msg) = check_guardrail_tool(
-                    guardrails, &turn_ctx, tool_name, input, tool_call_id
-                ).await {
-                    state.add_message(msg);
-                    continue;
-                }
-            }
+        // 处理执行结果
+        let mut replan_hint: Option<String> = None;
+        let mut early_stop_reason: Option<String> = None;
 
-            // Rollout: 记录工具开始
-            if let Some(ref mut rec) = rollout {
-                let _ = rec.tool_start(tool_name, input);
-            }
-
-            // ExecPolicy: 命令安全检查
-            if let Some(policy) = exec_policy {
-                if tool_name == "bash" {
-                    if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-                        match policy.check(cmd) {
-                            PolicyDecision::Allow => {}
-                            PolicyDecision::Forbid => {
-                                let result = crate::tools::ToolResult {
-                                    content: format!("🚫 命令被安全策略拦截: {}", cmd),
-                                    is_error: true,
-                                    metadata: None,
-                                };
-                                state.add_message(Message {
-                                    role: Role::Tool,
-                                    content: vec![ContentBlock::ToolResult {
-                                        tool_name: tool_name.clone(),
-                                        content: result.content,
-                                        is_error: true,
-                                        tool_call_id: tool_call_id.clone(),
-                                    }],
-                                    reasoning_content: None,
-                                    cache_breakpoint: false,
-                                });
-                                continue;
-                            }
-                        }
+        for outcome_res in execution_outcomes {
+            match outcome_res {
+                Ok(outcome) => {
+                    state.add_message(build_tool_result_message(
+                        &outcome.tool_call_id,
+                        &outcome.tool_name,
+                        &outcome.result.content,
+                        outcome.result.is_error,
+                    ));
+                    
+                    if let (Some(ref gm), Some(gid)) = (&goal_manager, state.goal_id()) {
+                        let mut gm_guard = gm.lock().await;
+                        gm_guard.record_tokens(gid, state.total_usage.input_tokens + state.total_usage.output_tokens);
                     }
                 }
-            }
-
-            // Hook: BeforeTool
-            if let Some(ref hook) = hook_engine {
-                let mut guard = hook.lock().await;
-                match guard.run_before(tool_name, &input.to_string()) {
-                    HookResult::Continue => {}
-                    HookResult::Block(reason) => {
-                        let result = crate::tools::ToolResult {
+                Err(crate::core::tool_executor::ToolExecutorError::GuardrailDenied { tool_call_id, tool_name, reason }) => {
+                    state.add_message(Message {
+                        role: Role::Tool,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_name,
+                            content: format!("Guardrail denied: {}", reason),
+                            is_error: true,
+                            tool_call_id,
+                        }],
+                        reasoning_content: None,
+                        cache_breakpoint: false,
+                    });
+                }
+                Err(crate::core::tool_executor::ToolExecutorError::HookBlocked { tool_call_id, tool_name, reason }) => {
+                    state.add_message(Message {
+                        role: Role::Tool,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_name,
                             content: format!("🚫 Hook 拦截: {}", reason),
                             is_error: true,
-                            metadata: None,
-                        };
-                        state.add_message(Message {
-                            role: Role::Tool,
-                            content: vec![ContentBlock::ToolResult {
-                                tool_name: tool_name.clone(),
-                                content: result.content,
-                                is_error: true,
-                                tool_call_id: tool_call_id.clone(),
-                            }],
-                            reasoning_content: None,
-                            cache_breakpoint: false,
-                        });
-                        continue;
-                    }
-                    HookResult::Retry => { /* 后续处理 */ }
+                            tool_call_id,
+                        }],
+                        reasoning_content: None,
+                        cache_breakpoint: false,
+                    });
                 }
-            }
-
-            // 发射 ToolStart 事件
-            if let Some(ref cb) = event_callback {
-                cb(&LoopEvent::ToolStart {
-                    tool_name: tool_name.clone(),
-                    tool_id: tool_call_id.clone(),
-                    input: input.clone(),
-                });
-            }
-
-            if state.exceeds_max_tool_calls(max_tool_calls) {
-                return LoopOutcome::GuardrailDenied {
-                    reason: format!("Max tool calls ({}) exceeded", max_tool_calls)
-                };
-            }
-
-            let output = crate::core::tool_executor::ToolExecutor::execute_single_tool(
-                tools, cache, &exec_config, tool_name, input, state.turn(),
-            ).await;
-            let mut result = output.result;
-            let elapsed = output.duration_ms;
-
-            // StepObserver: 评估工具结果并决定下一步
-            let mut early_stop_reason: Option<String> = None;
-            loop {
-                let action = {
-                    let mut obs = state.observer.lock().await;
-                    obs.observe(tool_name, &mut result)
-                };
-                match action {
-                    ObserveAction::Continue => break,
-                    ObserveAction::Retry => {
-                        info!("StepObserver retry: tool '{}'", tool_name);
-                        let retry_output = crate::core::tool_executor::ToolExecutor::execute_single_tool(
-                            tools, cache, &exec_config, tool_name, input, state.turn(),
-                        ).await;
-                        result = retry_output.result;
-                    }
-                    ObserveAction::Replan { hint } => {
-                        info!("StepObserver replan: {}", hint);
-                        state.add_message(Message {
-                            role: Role::System,
-                            content: vec![ContentBlock::Text { text: hint }],
-                            reasoning_content: None,
-                            cache_breakpoint: false,
-                        });
-                        break;
-                    }
-                    ObserveAction::EarlyStop { reason } => {
-                        info!("StepObserver early stop: {}", reason);
-                        early_stop_reason = Some(reason);
-                        break;
-                    }
+                Err(crate::core::tool_executor::ToolExecutorError::PolicyForbidden { tool_call_id, tool_name, command }) => {
+                    state.add_message(Message {
+                        role: Role::Tool,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_name,
+                            content: format!("🚫 命令被安全策略拦截: {}", command),
+                            is_error: true,
+                            tool_call_id,
+                        }],
+                        reasoning_content: None,
+                        cache_breakpoint: false,
+                    });
                 }
-            }
-
-            // 审计: 工具调用
-            {
-                let mut logger = AUDIT_LOGGER.lock().await;
-                logger.log(GlobalAuditEvent::ToolCall {
-                    tool_name: tool_name.clone(),
-                    input_summary: truncate_str(&input.to_string(), 200),
-                    success: !result.is_error,
-                    duration_ms: elapsed,
-                }, "loop");
-            }
-
-            // Rollout: 记录工具结束
-            if let Some(ref mut rec) = rollout {
-                let _ = rec.tool_end(tool_name, !result.is_error, &result.content, elapsed);
-            }
-
-            // Goal: 记录 token 使用
-            if let (Some(ref mut gm), Some(gid)) = (goal_manager.as_deref_mut(), state.goal_id()) {
-                gm.record_tokens(gid, state.total_usage.input_tokens + state.total_usage.output_tokens);
-            }
-
-            // Hook: AfterTool
-            if let Some(ref hook) = hook_engine {
-                let _ = hook.lock().await.run_after(tool_name, &result.content);
-            }
-
-            // 发射 ToolEnd 事件 (含完整输出)
-            if let Some(ref cb) = event_callback {
-                cb(&LoopEvent::ToolEnd {
-                    tool_name: tool_name.clone(),
-                    tool_id: tool_call_id.clone(),
-                    result: result.content.clone(),
-                    is_error: result.is_error,
-                    duration_ms: elapsed,
-                });
-            }
-
-            state.add_message(build_tool_result_message(
-                tool_call_id, tool_name, &result.content, result.is_error,
-            ));
-            state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::ToolResultChange);
-            debug!("CacheBreak: ToolResultChange ({})", tool_name);
-
-            // EarlyStop: 提前终止整个循环
-            if let Some(reason) = early_stop_reason {
-                return LoopOutcome::Completed {
-                    message: reason,
-                    usage: state.usage_clone(),
-                };
+                Err(crate::core::tool_executor::ToolExecutorError::Replan(hint)) => {
+                    replan_hint = Some(hint);
+                }
+                Err(crate::core::tool_executor::ToolExecutorError::EarlyStop(reason)) => {
+                    early_stop_reason = Some(reason);
+                }
+                Err(crate::core::tool_executor::ToolExecutorError::MaxToolCallsExceeded) => {
+                    return LoopOutcome::GuardrailDenied {
+                        reason: format!("Max tool calls ({}) exceeded", max_tool_calls)
+                    };
+                }
             }
         }
-        } // end else (串行执行)
+
+        if let Some(hint) = replan_hint {
+            state.add_message(Message {
+                role: Role::System,
+                content: vec![ContentBlock::Text { text: hint }],
+                reasoning_content: None,
+                cache_breakpoint: false,
+            });
+        }
+
+        if let Some(reason) = early_stop_reason {
+            return LoopOutcome::Completed {
+                message: reason,
+                usage: state.usage_clone(),
+            };
+        }
+
+        state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::ToolResultChange);
+        debug!("CacheBreak: ToolResultChange");
 
         // 上下文压缩: 消息过多时压缩 — 使用 ContextManager
         // 注: 此处使用直接字段借用，因为 ContextManager 同时需要 &mut cache_tracker 和 &mut messages，
@@ -1092,47 +939,7 @@ pub async fn run_simple_loop<'a>(
     }
 }
 
-/// 护栏检查 — 工具执行前检查
-///
-/// 返回 `Some(Message)` 表示被拦截（调用方应将该消息加入历史并跳过该工具）
-async fn check_guardrail_tool(
-    guardrails: Option<&crate::core::guardrail::GuardrailChain>,
-    turn_ctx: &crate::core::guardrail::TurnContext,
-    tool_name: &str,
-    input: &serde_json::Value,
-    tool_call_id: &str,
-) -> Option<Message> {
-    let gc = guardrails?;
-    match gc.check_tool(turn_ctx, tool_name, input).await {
-        crate::core::guardrail::GuardResult::Allow => None,
-        crate::core::guardrail::GuardResult::Deny(reason) => {
-            Some(Message {
-                role: Role::Tool,
-                content: vec![ContentBlock::ToolResult {
-                    tool_name: tool_name.to_string(),
-                    content: format!("Guardrail denied: {}", reason),
-                    is_error: true,
-                    tool_call_id: tool_call_id.to_string(),
-                }],
-                reasoning_content: None,
-                cache_breakpoint: false,
-            })
-        }
-        crate::core::guardrail::GuardResult::Skip => {
-            Some(Message {
-                role: Role::Tool,
-                content: vec![ContentBlock::ToolResult {
-                    tool_name: tool_name.to_string(),
-                    content: String::new(),
-                    is_error: true,
-                    tool_call_id: tool_call_id.to_string(),
-                }],
-                reasoning_content: None,
-                cache_breakpoint: false,
-            })
-        }
-    }
-}
+
 
 /// 构建工具结果消息
 fn build_tool_result_message(

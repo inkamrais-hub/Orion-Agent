@@ -2,7 +2,7 @@ pub mod provider;
 pub mod guardrail;
 pub mod cache;
 pub mod context;
-pub mod audit;
+pub mod audit; // DEPRECATED: 使用 crate::audit 代替
 pub mod r#loop;
 pub mod tool_executor;
 pub mod providers;

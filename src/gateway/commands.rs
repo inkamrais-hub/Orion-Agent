@@ -74,10 +74,9 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         handler: Box::new(|args, ctx| {
             Box::pin(async move {
                 let port = args.first().and_then(|s| s.parse::<u16>().ok()).unwrap_or(8080);
-                let db_path = crate::config::data_dir_path().join("agents.db");
-                let agent_store = std::sync::Arc::new(crate::agent::store::AgentStore::new(&db_path)?);
+                let store = std::sync::Arc::new(crate::session::UnifiedStore::open().await?);
                 let api_state = std::sync::Arc::new(crate::api::ApiState {
-                    agent_store,
+                    store,
                     config: ctx.config,
                 });
                 let app = crate::api::create_router(api_state);
@@ -92,17 +91,21 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
     // Run 命令
     registry.register(Command {
         name: "run".into(),
-        description: "执行单次任务".into(),
+        description: "执行单次任务 (--sandbox 启用无网络沙箱)".into(),
         handler: Box::new(|args, ctx| {
             Box::pin(async move {
-                // 解析 --image 参数
+                // 解析参数: --image, --sandbox
                 let mut image_paths: Vec<String> = Vec::new();
                 let mut task_parts: Vec<String> = Vec::new();
+                let mut sandbox = false;
                 let mut i = 0;
                 while i < args.len() {
                     if args[i] == "--image" && i + 1 < args.len() {
                         image_paths.push(args[i + 1].clone());
                         i += 2;
+                    } else if args[i] == "--sandbox" {
+                        sandbox = true;
+                        i += 1;
                     } else {
                         task_parts.push(args[i].clone());
                         i += 1;
@@ -116,7 +119,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
                 let images = load_images(&image_paths)?;
                 let images = if images.is_empty() { None } else { Some(images) };
 
-                let message = super::run_task_once(&task, &ctx.config, images).await?;
+                let message = super::run_task_once(&task, &ctx.config, images, sandbox).await?;
                 println!("{}", message);
                 Ok(())
             })
@@ -141,11 +144,26 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         description: "索引项目代码".into(),
         handler: Box::new(|_args, _ctx| {
             Box::pin(async {
-                println!("代码索引功能开发中...");
+                println!("🔍 正在分析项目并建立代码索引...");
+                let cwd = std::env::current_dir().map_err(|e| crate::Error::Config(e.to_string()))?;
+                let mut index = crate::index::engine::CodeIndex::open(&cwd)?;
+                match index.index() {
+                    Ok(report) => {
+                        println!("✓ 索引建立完成！");
+                        println!("  • 总文件数: {}", report.total_files);
+                        println!("  • 变更/新增文件: {}", report.changed_files);
+                        println!("  • 提取符号数: {}", report.total_symbols);
+                        println!("  • 耗时: {}ms", report.elapsed_ms);
+                    }
+                    Err(e) => {
+                        eprintln!("❌ 建立索引失败: {}", e);
+                    }
+                }
                 Ok(())
             })
         }),
     });
+
 }
 
 /// 加载图片文件并转为 Base64 ContentBlock

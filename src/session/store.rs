@@ -9,7 +9,7 @@
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 
 // ── Session 类型 ──────────────────────────────────────────
@@ -92,7 +92,7 @@ pub struct Snapshot {
 
 /// SQLite Session 存储
 pub struct SessionStore {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SessionStore {
@@ -105,7 +105,7 @@ impl SessionStore {
 
         let conn = Connection::open(db_path)?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         store.init_tables()?;
         Ok(store)
@@ -115,7 +115,7 @@ impl SessionStore {
     pub fn in_memory() -> crate::Result<Self> {
         let conn = Connection::open_in_memory()?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         store.init_tables()?;
         Ok(store)
@@ -123,7 +123,10 @@ impl SessionStore {
 
     /// 初始化数据库表
     fn init_tables(&self) -> crate::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         
         conn.execute_batch("
             CREATE TABLE IF NOT EXISTS sessions (
@@ -187,7 +190,10 @@ impl SessionStore {
 
     /// 创建 Session
     pub fn create_session(&self, meta: &SessionMeta) -> crate::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         conn.execute(
             "INSERT INTO sessions (session_id, agent_name, model, working_dir, status, created_at, updated_at, turn_count, tool_call_count, total_tokens)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -196,7 +202,7 @@ impl SessionStore {
                 meta.agent_name,
                 meta.model,
                 meta.working_dir,
-                serde_json::to_string(&meta.status).unwrap_or_default(),
+                status_to_str(&meta.status),
                 meta.created_at.to_rfc3339(),
                 meta.updated_at.to_rfc3339(),
                 meta.turn_count,
@@ -209,7 +215,10 @@ impl SessionStore {
 
     /// 获取 Session
     pub fn get_session(&self, session_id: &str) -> crate::Result<Option<SessionMeta>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let mut stmt = conn.prepare(
             "SELECT session_id, agent_name, model, working_dir, status, created_at, updated_at, turn_count, tool_call_count, total_tokens
              FROM sessions WHERE session_id = ?1"
@@ -221,7 +230,7 @@ impl SessionStore {
                 agent_name: row.get(1)?,
                 model: row.get(2)?,
                 working_dir: row.get(3)?,
-                status: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or(SessionStatus::Active),
+                status: status_from_str(&row.get::<_, String>(4)?),
                 created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                     .unwrap_or_default().with_timezone(&Utc),
                 updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
@@ -241,7 +250,10 @@ impl SessionStore {
 
     /// 列出最近的 Session
     pub fn list_sessions(&self, limit: u32) -> crate::Result<Vec<SessionMeta>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let mut stmt = conn.prepare(
             "SELECT session_id, agent_name, model, working_dir, status, created_at, updated_at, turn_count, tool_call_count, total_tokens
              FROM sessions ORDER BY updated_at DESC LIMIT ?1"
@@ -253,7 +265,7 @@ impl SessionStore {
                 agent_name: row.get(1)?,
                 model: row.get(2)?,
                 working_dir: row.get(3)?,
-                status: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or(SessionStatus::Active),
+                status: status_from_str(&row.get::<_, String>(4)?),
                 created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                     .unwrap_or_default().with_timezone(&Utc),
                 updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
@@ -273,17 +285,23 @@ impl SessionStore {
 
     /// 更新 Session 状态
     pub fn update_session_status(&self, session_id: &str, status: SessionStatus) -> crate::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         conn.execute(
             "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE session_id = ?3",
-            params![serde_json::to_string(&status).unwrap_or_default(), Utc::now().to_rfc3339(), session_id],
+            params![status_to_str(&status), Utc::now().to_rfc3339(), session_id],
         )?;
         Ok(())
     }
 
     /// 更新 Session 统计
     pub fn update_session_stats(&self, session_id: &str, turn_count: u32, tool_call_count: u32, total_tokens: u64) -> crate::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         conn.execute(
             "UPDATE sessions SET turn_count = ?1, tool_call_count = ?2, total_tokens = ?3, updated_at = ?4 WHERE session_id = ?5",
             params![turn_count, tool_call_count, total_tokens, Utc::now().to_rfc3339(), session_id],
@@ -295,7 +313,10 @@ impl SessionStore {
 
     /// 保存 Turn
     pub fn save_turn(&self, turn: &Turn) -> crate::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         conn.execute(
             "INSERT INTO turns (turn_id, session_id, turn_index, role, content, thinking, created_at, tokens_used)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -315,48 +336,79 @@ impl SessionStore {
 
     /// 获取 Session 的所有 Turn
     pub fn get_turns(&self, session_id: &str) -> crate::Result<Vec<Turn>> {
-        let turn_ids: Vec<(String, u32, String, String, Option<String>, String, u32)> = {
-            let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT turn_id, turn_index, role, content, thinking, created_at, tokens_used
-                 FROM turns WHERE session_id = ?1 ORDER BY turn_index"
-            )?;
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
 
-            let rows = stmt.query_map(params![session_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,  // turn_id
-                    row.get::<_, u32>(1)?,     // turn_index
-                    row.get::<_, String>(2)?,  // role
-                    row.get::<_, String>(3)?,  // content
-                    row.get::<_, Option<String>>(4)?, // thinking
-                    row.get::<_, String>(5)?,  // created_at
-                    row.get::<_, u32>(6)?,     // tokens_used
-                ))
-            })?;
+        // 获取所有 turns
+        let mut stmt = conn.prepare(
+            "SELECT turn_id, turn_index, role, content, thinking, created_at, tokens_used
+             FROM turns WHERE session_id = ?1 ORDER BY turn_index"
+        )?;
+        let turn_rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, u32>(6)?,
+            ))
+        })?;
+        let mut turn_data = Vec::new();
+        for row in turn_rows {
+            turn_data.push(row?);
+        }
 
-            let mut result = Vec::new();
-            for row in rows {
-                result.push(row?);
-            }
-            result
-        };
+        // 一次性获取所有 tool_calls
+        let mut tc_stmt = conn.prepare(
+            "SELECT call_id, turn_id, tool_name, input_summary, output_summary, success, duration_ms
+             FROM tool_calls WHERE session_id = ?1 ORDER BY call_id"
+        )?;
+        let tc_rows = tc_stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,  // call_id
+                row.get::<_, String>(1)?,  // turn_id
+                row.get::<_, String>(2)?,  // tool_name
+                row.get::<_, String>(3)?,  // input_summary
+                row.get::<_, String>(4)?,  // output_summary
+                row.get::<_, i32>(5)?,     // success
+                row.get::<_, u64>(6)?,     // duration_ms
+            ))
+        })?;
 
-        // 在锁外填充 tool_calls
-        let mut turns = Vec::new();
-        for (turn_id, turn_index, role, content, thinking, created_at, tokens_used) in turn_ids {
-            turns.push(Turn {
+        // Group by turn_id
+        let mut tc_map: std::collections::HashMap<String, Vec<ToolCallRecord>> = std::collections::HashMap::new();
+        for row in tc_rows {
+            let (call_id, turn_id, tool_name, input_summary, output_summary, success, duration_ms) = row?;
+            tc_map.entry(turn_id).or_default().push(ToolCallRecord {
+                call_id,
+                tool_name,
+                input_summary,
+                output_summary,
+                success: success != 0,
+                duration_ms,
+            });
+        }
+
+        // Build turns
+        let turns = turn_data.into_iter().map(|(turn_id, turn_index, role, content, thinking, created_at, tokens_used)| {
+            Turn {
                 turn_id: turn_id.clone(),
                 session_id: session_id.to_string(),
                 turn_index,
                 role,
                 content,
                 thinking,
-                tool_calls: self.get_tool_calls_for_turn(&turn_id)?,
+                tool_calls: tc_map.remove(&turn_id).unwrap_or_default(),
                 created_at: DateTime::parse_from_rfc3339(&created_at)
                     .unwrap_or_default().with_timezone(&Utc),
                 tokens_used,
-            });
-        }
+            }
+        }).collect();
+
         Ok(turns)
     }
 
@@ -364,7 +416,10 @@ impl SessionStore {
 
     /// 保存工具调用
     pub fn save_tool_call(&self, call: &ToolCallRecord, turn_id: &str, session_id: &str) -> crate::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         conn.execute(
             "INSERT INTO tool_calls (call_id, turn_id, session_id, tool_name, input_summary, output_summary, success, duration_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -384,7 +439,10 @@ impl SessionStore {
 
     /// 获取 Turn 的工具调用
     fn get_tool_calls_for_turn(&self, turn_id: &str) -> crate::Result<Vec<ToolCallRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let mut stmt = conn.prepare(
             "SELECT call_id, tool_name, input_summary, output_summary, success, duration_ms
              FROM tool_calls WHERE turn_id = ?1"
@@ -410,7 +468,10 @@ impl SessionStore {
 
     /// 获取 Session 的所有工具调用
     pub fn get_tool_calls(&self, session_id: &str) -> crate::Result<Vec<ToolCallRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let mut stmt = conn.prepare(
             "SELECT call_id, tool_name, input_summary, output_summary, success, duration_ms
              FROM tool_calls WHERE session_id = ?1 ORDER BY call_id"
@@ -438,7 +499,10 @@ impl SessionStore {
 
     /// 保存快照 (预留)
     pub fn save_snapshot(&self, snapshot: &Snapshot) -> crate::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         conn.execute(
             "INSERT INTO snapshots (snapshot_id, session_id, snapshot_type, created_at, file_hashes, metadata)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -456,7 +520,10 @@ impl SessionStore {
 
     /// 获取 Session 的快照 (预留)
     pub fn get_snapshots(&self, session_id: &str) -> crate::Result<Vec<Snapshot>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("SQLite mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         let mut stmt = conn.prepare(
             "SELECT snapshot_id, session_id, snapshot_type, created_at, file_hashes, metadata
              FROM snapshots WHERE session_id = ?1 ORDER BY created_at"
@@ -479,6 +546,524 @@ impl SessionStore {
             result.push(row?);
         }
         Ok(result)
+    }
+
+    // ── Async API (spawn_blocking) ─────────────────────
+
+    /// Async wrapper for create_session()
+    pub async fn create_session_async(&self, meta: SessionMeta) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "INSERT INTO sessions (session_id, agent_name, model, working_dir, status, created_at, updated_at, turn_count, tool_call_count, total_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    meta.session_id,
+                    meta.agent_name,
+                    meta.model,
+                    meta.working_dir,
+                    status_to_str(&meta.status),
+                    meta.created_at.to_rfc3339(),
+                    meta.updated_at.to_rfc3339(),
+                    meta.turn_count,
+                    meta.tool_call_count,
+                    meta.total_tokens,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for get_session()
+    pub async fn get_session_async(&self, session_id: String) -> crate::Result<Option<SessionMeta>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT session_id, agent_name, model, working_dir, status, created_at, updated_at, turn_count, tool_call_count, total_tokens
+                 FROM sessions WHERE session_id = ?1"
+            )?;
+
+            let mut rows = stmt.query_map(params![session_id.as_str()], |row| {
+                Ok(SessionMeta {
+                    session_id: row.get(0)?,
+                    agent_name: row.get(1)?,
+                    model: row.get(2)?,
+                    working_dir: row.get(3)?,
+                    status: status_from_str(&row.get::<_, String>(4)?),
+                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .unwrap_or_default().with_timezone(&Utc),
+                    updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
+                        .unwrap_or_default().with_timezone(&Utc),
+                    turn_count: row.get(7)?,
+                    tool_call_count: row.get(8)?,
+                    total_tokens: row.get(9)?,
+                })
+            })?;
+
+            match rows.next() {
+                Some(Ok(meta)) => Ok(Some(meta)),
+                Some(Err(e)) => Err(e.into()),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for list_sessions()
+    pub async fn list_sessions_async(&self, limit: u32) -> crate::Result<Vec<SessionMeta>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT session_id, agent_name, model, working_dir, status, created_at, updated_at, turn_count, tool_call_count, total_tokens
+                 FROM sessions ORDER BY updated_at DESC LIMIT ?1"
+            )?;
+
+            let rows = stmt.query_map(params![limit], |row| {
+                Ok(SessionMeta {
+                    session_id: row.get(0)?,
+                    agent_name: row.get(1)?,
+                    model: row.get(2)?,
+                    working_dir: row.get(3)?,
+                    status: status_from_str(&row.get::<_, String>(4)?),
+                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .unwrap_or_default().with_timezone(&Utc),
+                    updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
+                        .unwrap_or_default().with_timezone(&Utc),
+                    turn_count: row.get(7)?,
+                    tool_call_count: row.get(8)?,
+                    total_tokens: row.get(9)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row?);
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for update_session_status()
+    pub async fn update_session_status_async(
+        &self,
+        session_id: String,
+        status: SessionStatus,
+    ) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE session_id = ?3",
+                params![status_to_str(&status), Utc::now().to_rfc3339(), session_id.as_str()],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for update_session_stats()
+    pub async fn update_session_stats_async(
+        &self,
+        session_id: String,
+        turn_count: u32,
+        tool_call_count: u32,
+        total_tokens: u64,
+    ) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "UPDATE sessions SET turn_count = ?1, tool_call_count = ?2, total_tokens = ?3, updated_at = ?4 WHERE session_id = ?5",
+                params![turn_count, tool_call_count, total_tokens, Utc::now().to_rfc3339(), session_id.as_str()],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for save_turn()
+    pub async fn save_turn_async(&self, turn: Turn) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "INSERT INTO turns (turn_id, session_id, turn_index, role, content, thinking, created_at, tokens_used)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    turn.turn_id,
+                    turn.session_id,
+                    turn.turn_index,
+                    turn.role,
+                    turn.content,
+                    turn.thinking,
+                    turn.created_at.to_rfc3339(),
+                    turn.tokens_used,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for get_turns() - uses optimized single-query approach
+    pub async fn get_turns_async(&self, session_id: String) -> crate::Result<Vec<Turn>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+
+            // Fetch all turns for this session
+            let mut stmt = conn.prepare(
+                "SELECT turn_id, turn_index, role, content, thinking, created_at, tokens_used
+                 FROM turns WHERE session_id = ?1 ORDER BY turn_index"
+            )?;
+            let turn_rows = stmt.query_map(params![session_id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, u32>(6)?,
+                ))
+            })?;
+            let mut turn_data = Vec::new();
+            for row in turn_rows {
+                turn_data.push(row?);
+            }
+
+            // Fetch all tool_calls in a single query (optimized)
+            let mut tc_stmt = conn.prepare(
+                "SELECT call_id, turn_id, tool_name, input_summary, output_summary, success, duration_ms
+                 FROM tool_calls WHERE session_id = ?1 ORDER BY call_id"
+            )?;
+            let tc_rows = tc_stmt.query_map(params![session_id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i32>(5)?,
+                    row.get::<_, u64>(6)?,
+                ))
+            })?;
+
+            // Group tool calls by turn_id
+            let mut tc_map: std::collections::HashMap<String, Vec<ToolCallRecord>> =
+                std::collections::HashMap::new();
+            for row in tc_rows {
+                let (call_id, turn_id, tool_name, input_summary, output_summary, success, duration_ms) = row?;
+                tc_map.entry(turn_id).or_default().push(ToolCallRecord {
+                    call_id,
+                    tool_name,
+                    input_summary,
+                    output_summary,
+                    success: success != 0,
+                    duration_ms,
+                });
+            }
+
+            // Build Turn structs from combined data
+            let turns = turn_data
+                .into_iter()
+                .map(|(turn_id, turn_index, role, content, thinking, created_at, tokens_used)| {
+                    Turn {
+                        turn_id: turn_id.clone(),
+                        session_id: session_id.clone(),
+                        turn_index,
+                        role,
+                        content,
+                        thinking,
+                        tool_calls: tc_map.remove(&turn_id).unwrap_or_default(),
+                        created_at: DateTime::parse_from_rfc3339(&created_at)
+                            .unwrap_or_default()
+                            .with_timezone(&Utc),
+                        tokens_used,
+                    }
+                })
+                .collect();
+
+            Ok(turns)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for save_tool_call()
+    pub async fn save_tool_call_async(
+        &self,
+        call: ToolCallRecord,
+        turn_id: String,
+        session_id: String,
+    ) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "INSERT INTO tool_calls (call_id, turn_id, session_id, tool_name, input_summary, output_summary, success, duration_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    call.call_id,
+                    turn_id.as_str(),
+                    session_id.as_str(),
+                    call.tool_name,
+                    call.input_summary,
+                    call.output_summary,
+                    call.success as i32,
+                    call.duration_ms,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for get_tool_calls()
+    pub async fn get_tool_calls_async(&self, session_id: String) -> crate::Result<Vec<ToolCallRecord>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT call_id, tool_name, input_summary, output_summary, success, duration_ms
+                 FROM tool_calls WHERE session_id = ?1 ORDER BY call_id"
+            )?;
+
+            let rows = stmt.query_map(params![session_id.as_str()], |row| {
+                Ok(ToolCallRecord {
+                    call_id: row.get(0)?,
+                    tool_name: row.get(1)?,
+                    input_summary: row.get(2)?,
+                    output_summary: row.get(3)?,
+                    success: row.get::<_, i32>(4)? != 0,
+                    duration_ms: row.get(5)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row?);
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for save_snapshot()
+    pub async fn save_snapshot_async(&self, snapshot: Snapshot) -> crate::Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "INSERT INTO snapshots (snapshot_id, session_id, snapshot_type, created_at, file_hashes, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    snapshot.snapshot_id,
+                    snapshot.session_id,
+                    snapshot.snapshot_type,
+                    snapshot.created_at.to_rfc3339(),
+                    serde_json::to_string(&snapshot.file_hashes).unwrap_or_default(),
+                    snapshot.metadata,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for get_snapshots()
+    pub async fn get_snapshots_async(&self, session_id: String) -> crate::Result<Vec<Snapshot>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT snapshot_id, session_id, snapshot_type, created_at, file_hashes, metadata
+                 FROM snapshots WHERE session_id = ?1 ORDER BY created_at"
+            )?;
+
+            let rows = stmt.query_map(params![session_id.as_str()], |row| {
+                Ok(Snapshot {
+                    snapshot_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    snapshot_type: row.get(2)?,
+                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                        .unwrap_or_default().with_timezone(&Utc),
+                    file_hashes: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                    metadata: row.get(5)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row?);
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Async wrapper for audit_report() - all queries run in a single blocking task
+    pub async fn audit_report_async(&self, session_id: String) -> crate::Result<SessionAuditReport> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|p| p.into_inner());
+
+            // Fetch session
+            let session = {
+                let mut stmt = conn.prepare(
+                    "SELECT session_id, agent_name, model, working_dir, status, created_at, updated_at, turn_count, tool_call_count, total_tokens
+                     FROM sessions WHERE session_id = ?1"
+                )?;
+                let mut rows = stmt.query_map(params![session_id.as_str()], |row| {
+                    Ok(SessionMeta {
+                        session_id: row.get(0)?,
+                        agent_name: row.get(1)?,
+                        model: row.get(2)?,
+                        working_dir: row.get(3)?,
+                        status: status_from_str(&row.get::<_, String>(4)?),
+                        created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                            .unwrap_or_default().with_timezone(&Utc),
+                        updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
+                            .unwrap_or_default().with_timezone(&Utc),
+                        turn_count: row.get(7)?,
+                        tool_call_count: row.get(8)?,
+                        total_tokens: row.get(9)?,
+                    })
+                })?;
+                match rows.next() {
+                    Some(Ok(meta)) => meta,
+                    Some(Err(e)) => return Err(e.into()),
+                    None => {
+                        return Err(crate::Error::Tool(format!("Session not found: {}", session_id)).into());
+                    }
+                }
+            };
+
+            // Fetch turns
+            let turns = {
+                let mut stmt = conn.prepare(
+                    "SELECT turn_id, turn_index, role, content, thinking, created_at, tokens_used
+                     FROM turns WHERE session_id = ?1 ORDER BY turn_index"
+                )?;
+                let turn_rows = stmt.query_map(params![session_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, u32>(6)?,
+                    ))
+                })?;
+                let mut turn_data = Vec::new();
+                for row in turn_rows {
+                    turn_data.push(row?);
+                }
+
+                let mut tc_stmt = conn.prepare(
+                    "SELECT call_id, turn_id, tool_name, input_summary, output_summary, success, duration_ms
+                     FROM tool_calls WHERE session_id = ?1 ORDER BY call_id"
+                )?;
+                let tc_rows = tc_stmt.query_map(params![session_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i32>(5)?,
+                        row.get::<_, u64>(6)?,
+                    ))
+                })?;
+
+                let mut tc_map: std::collections::HashMap<String, Vec<ToolCallRecord>> =
+                    std::collections::HashMap::new();
+                for row in tc_rows {
+                    let (call_id, turn_id, tool_name, input_summary, output_summary, success, duration_ms) = row?;
+                    tc_map.entry(turn_id).or_default().push(ToolCallRecord {
+                        call_id,
+                        tool_name,
+                        input_summary,
+                        output_summary,
+                        success: success != 0,
+                        duration_ms,
+                    });
+                }
+
+                turn_data
+                    .into_iter()
+                    .map(|(turn_id, turn_index, role, content, thinking, created_at, tokens_used)| {
+                        Turn {
+                            turn_id: turn_id.clone(),
+                            session_id: session_id.clone(),
+                            turn_index,
+                            role,
+                            content,
+                            thinking,
+                            tool_calls: tc_map.remove(&turn_id).unwrap_or_default(),
+                            created_at: DateTime::parse_from_rfc3339(&created_at)
+                                .unwrap_or_default()
+                                .with_timezone(&Utc),
+                            tokens_used,
+                        }
+                    })
+                    .collect()
+            };
+
+            // Fetch tool calls
+            let tool_calls = {
+                let mut stmt = conn.prepare(
+                    "SELECT call_id, tool_name, input_summary, output_summary, success, duration_ms
+                     FROM tool_calls WHERE session_id = ?1 ORDER BY call_id"
+                )?;
+                let rows = stmt.query_map(params![session_id.as_str()], |row| {
+                    Ok(ToolCallRecord {
+                        call_id: row.get(0)?,
+                        tool_name: row.get(1)?,
+                        input_summary: row.get(2)?,
+                        output_summary: row.get(3)?,
+                        success: row.get::<_, i32>(4)? != 0,
+                        duration_ms: row.get(5)?,
+                    })
+                })?;
+                let mut result = Vec::new();
+                for row in rows {
+                    result.push(row?);
+                }
+                result
+            };
+
+            let successful_calls = tool_calls.iter().filter(|c| c.success).count();
+            let failed_calls = tool_calls.iter().filter(|c| !c.success).count();
+            let total_duration_ms: u64 = tool_calls.iter().map(|c| c.duration_ms).sum();
+
+            Ok(SessionAuditReport {
+                session,
+                turns,
+                tool_calls,
+                successful_calls,
+                failed_calls,
+                total_duration_ms,
+            })
+        })
+        .await
+        .map_err(|e| crate::Error::Agent(format!("spawn_blocking: {}", e)))?
     }
 
     // ── 审计报告 ────────────────────────────────────────
@@ -514,6 +1099,27 @@ pub struct SessionAuditReport {
     pub successful_calls: usize,
     pub failed_calls: usize,
     pub total_duration_ms: u64,
+}
+
+fn status_to_str(status: &SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Active => "active",
+        SessionStatus::Paused => "paused",
+        SessionStatus::Completed => "completed",
+        SessionStatus::Failed => "failed",
+        SessionStatus::Deleted => "deleted",
+    }
+}
+
+fn status_from_str(s: &str) -> SessionStatus {
+    match s {
+        "active" => SessionStatus::Active,
+        "paused" => SessionStatus::Paused,
+        "completed" => SessionStatus::Completed,
+        "failed" => SessionStatus::Failed,
+        "deleted" => SessionStatus::Deleted,
+        _ => SessionStatus::Active,
+    }
 }
 
 // ── Session ID 生成 ──────────────────────────────────────

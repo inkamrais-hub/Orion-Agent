@@ -13,6 +13,20 @@ use chrono::Utc;
 
 use super::{SessionEntry, SessionStatus, TranscriptEntry};
 
+/// 验证 session_id 是否安全
+fn validate_session_id(id: &str) -> crate::Result<()> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(crate::Error::Agent(format!(
+            "Invalid session_id: '{}'",
+            id
+        )));
+    }
+    Ok(())
+}
+
 /// Session 管理器
 pub struct SessionManager {
     session_dir: PathBuf,
@@ -63,6 +77,7 @@ impl SessionManager {
 
     /// 恢复 session (读取对话记录)
     pub async fn restore(&self, session_id: &str) -> crate::Result<Vec<TranscriptEntry>> {
+        validate_session_id(session_id)?;
         let jsonl_path = self.session_dir.join(format!("{}.jsonl", session_id));
         let content = fs::read_to_string(&jsonl_path).await.unwrap_or_default();
 
@@ -80,6 +95,7 @@ impl SessionManager {
 
     /// 追加对话消息
     pub async fn append_transcript(&self, session_id: &str, entry: &TranscriptEntry) -> crate::Result<()> {
+        validate_session_id(session_id)?;
         let jsonl_path = self.session_dir.join(format!("{}.jsonl", session_id));
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -96,6 +112,7 @@ impl SessionManager {
 
     /// 更新 session 元数据
     pub async fn update(&self, session_id: &str, update_fn: impl FnOnce(&mut SessionEntry)) -> crate::Result<()> {
+        validate_session_id(session_id)?;
         let mut index = self.load_index().await;
         let key = format!("agent:{}", session_id);
         if let Some(entry) = index.get_mut(&key) {
@@ -136,6 +153,7 @@ impl SessionManager {
 
     /// 删除 session
     pub async fn delete(&self, session_id: &str) -> crate::Result<()> {
+        validate_session_id(session_id)?;
         let jsonl_path = self.session_dir.join(format!("{}.jsonl", session_id));
         let _ = fs::remove_file(&jsonl_path).await;
 

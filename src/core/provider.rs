@@ -154,6 +154,12 @@ pub struct TokenBudget {
 
 impl TokenBudget {
     pub fn new(max_input: TokenCount, max_output: TokenCount) -> Self {
+        if max_input == 0 {
+            tracing::warn!("TokenBudget: max_input_tokens is 0, budget will report full usage for input");
+        }
+        if max_output == 0 {
+            tracing::warn!("TokenBudget: max_output_tokens is 0, budget will report full usage for output");
+        }
         Self {
             max_input_tokens: max_input,
             max_output_tokens: max_output,
@@ -165,10 +171,12 @@ impl TokenBudget {
     }
 
     pub fn input_usage(&self) -> f64 {
+        if self.max_input_tokens == 0 { return 1.0; } // 零预算视为已满
         self.used_input as f64 / self.max_input_tokens as f64
     }
 
     pub fn output_usage(&self) -> f64 {
+        if self.max_output_tokens == 0 { return 1.0; } // 零预算视为已满
         self.used_output as f64 / self.max_output_tokens as f64
     }
 
@@ -196,4 +204,75 @@ pub enum BudgetStatus {
     Ok,
     Warning,
     Critical,
+}
+
+// ============================================================
+//  Tests: TokenBudget 预算管理
+// ============================================================
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn test_zero_budget_returns_full() {
+        let budget = TokenBudget::new(0, 0);
+        // Zero budget is treated as fully used
+        assert_eq!(budget.input_usage(), 1.0);
+        assert_eq!(budget.output_usage(), 1.0);
+    }
+
+    #[test]
+    fn test_normal_usage_calculation() {
+        let mut budget = TokenBudget::new(1000, 500);
+        budget.used_input = 250;
+        budget.used_output = 100;
+        assert!((budget.input_usage() - 0.25).abs() < f64::EPSILON);
+        assert!((budget.output_usage() - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_status_ok_under_thresholds() {
+        let mut budget = TokenBudget::new(1000, 1000);
+        budget.used_input = 500;
+        budget.used_output = 500;
+        assert_eq!(budget.status(), BudgetStatus::Ok);
+    }
+
+    #[test]
+    fn test_status_warning_at_threshold() {
+        let mut budget = TokenBudget::new(1000, 1000);
+        budget.used_input = 800;
+        budget.used_output = 0;
+        assert_eq!(budget.status(), BudgetStatus::Warning);
+    }
+
+    #[test]
+    fn test_status_critical_at_threshold() {
+        let mut budget = TokenBudget::new(1000, 1000);
+        budget.used_input = 950;
+        budget.used_output = 0;
+        assert_eq!(budget.status(), BudgetStatus::Critical);
+    }
+
+    #[test]
+    fn test_record_usage_accumulates() {
+        let mut budget = TokenBudget::new(1000, 500);
+        let usage1 = UsageInfo {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        };
+        let usage2 = UsageInfo {
+            input_tokens: 200,
+            output_tokens: 100,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        };
+        budget.record_usage(&usage1);
+        budget.record_usage(&usage2);
+        assert_eq!(budget.used_input, 300);
+        assert_eq!(budget.used_output, 150);
+    }
 }

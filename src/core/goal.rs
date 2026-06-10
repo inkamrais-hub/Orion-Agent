@@ -30,6 +30,10 @@ pub struct Goal {
     pub status: GoalStatus,
     pub token_budget: u64,
     pub tokens_used: u64,
+    /// Tracks the last cumulative token value passed to `record_tokens`
+    /// so that only the delta is added to `tokens_used`.
+    #[serde(default)]
+    pub last_recorded_tokens: u64,
     pub block_count: u32,
     pub last_blocked_reason: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -75,6 +79,7 @@ impl GoalManager {
             status: GoalStatus::Active,
             token_budget,
             tokens_used: 0,
+            last_recorded_tokens: 0,
             block_count: 0,
             last_blocked_reason: None,
             created_at: now,
@@ -99,9 +104,15 @@ impl GoalManager {
     }
 
     /// 记录 token 使用
-    pub fn record_tokens(&mut self, goal_id: &str, tokens: u64) -> Option<&Goal> {
+    ///
+    /// `cumulative_tokens` is the running total from the caller (e.g.
+    /// `state.total_usage.input_tokens + state.total_usage.output_tokens`).
+    /// Only the delta since the last call is added to `tokens_used`.
+    pub fn record_tokens(&mut self, goal_id: &str, cumulative_tokens: u64) -> Option<&Goal> {
         if let Some(goal) = self.goals.iter_mut().find(|g| g.goal_id == goal_id) {
-            goal.tokens_used += tokens;
+            let delta = cumulative_tokens.saturating_sub(goal.last_recorded_tokens);
+            goal.tokens_used += delta;
+            goal.last_recorded_tokens = cumulative_tokens;
             goal.updated_at = Utc::now();
         }
         self.get(goal_id)
@@ -240,5 +251,51 @@ mod tests {
         
         let steering = manager.check_steering(&id);
         assert!(matches!(steering, Some(SteeringType::Continuation)));
+    }
+
+    #[test]
+    fn test_record_tokens_delta() {
+        let mut manager = GoalManager::new();
+        let id = manager.create("token delta test", 1000);
+
+        // Turn 1: cumulative 100 → delta = 100, tokens_used = 100
+        manager.record_tokens(&id, 100);
+        assert_eq!(manager.get(&id).unwrap().tokens_used, 100);
+
+        // Turn 2: cumulative 250 → delta = 150, tokens_used = 250
+        manager.record_tokens(&id, 250);
+        assert_eq!(manager.get(&id).unwrap().tokens_used, 250);
+
+        // Turn 3: cumulative 400 → delta = 150, tokens_used = 400
+        manager.record_tokens(&id, 400);
+        assert_eq!(manager.get(&id).unwrap().tokens_used, 400);
+    }
+
+    #[test]
+    fn test_record_tokens_same_value_no_double_count() {
+        let mut manager = GoalManager::new();
+        let id = manager.create("no double count test", 1000);
+
+        // Record the same cumulative value twice — delta should be 0 the second time
+        manager.record_tokens(&id, 100);
+        manager.record_tokens(&id, 100);
+        assert_eq!(manager.get(&id).unwrap().tokens_used, 100);
+    }
+
+    #[test]
+    fn test_active_goal_returns_active_and_blocked() {
+        let mut manager = GoalManager::new();
+        let id1 = manager.create("active goal", 1000);
+        let id2 = manager.create("blocked goal", 1000);
+        let _id3 = manager.create("completed goal", 1000);
+
+        manager.update(&id2, GoalStatus::Blocked);
+        manager.update(&_id3, GoalStatus::Completed);
+
+        // active_goal should return the first Active or Blocked goal
+        let active = manager.active_goal();
+        assert!(active.is_some());
+        let active_id = &active.unwrap().goal_id;
+        assert!(active_id == &id1 || active_id == &id2);
     }
 }

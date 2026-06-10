@@ -16,7 +16,7 @@ use orion_agent::core::providers::openai_compat::OpenAICompatProvider;
 async fn main() -> orion_agent::Result<()> {
     let _ = dotenvy::dotenv();
 
-    let provider = Box::new(OpenAICompatProvider::from_env());
+    let provider = Box::new(OpenAICompatProvider::from_env()?);
     let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
 
     let user_input = std::env::args().nth(1).unwrap_or_else(|| {

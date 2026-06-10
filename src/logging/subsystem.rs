@@ -14,9 +14,14 @@ pub const SUBSYSTEMS: &[&str] = &[
     "context",      // 上下文管理
 ];
 
+static LOG_FILTER: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    std::env::var("ORION_LOG").unwrap_or_default()
+});
+
 /// 检查 subsystem 是否启用
 pub fn is_enabled(subsystem: &str) -> bool {
-    if let Ok(log_spec) = std::env::var("ORION_LOG") {
+    let log_spec = &*LOG_FILTER;
+    if !log_spec.is_empty() {
         // 检查是否有明确的 subsystem 过滤
         for part in log_spec.split(',') {
             let mut parts = part.splitn(2, ':');

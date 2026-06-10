@@ -29,8 +29,12 @@ impl Tool for AskUserTool {
         }
         use std::io::Write;
         std::io::stderr().flush().ok();
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer).map_err(|e|crate::Error::Io(e))?;
+        let answer = tokio::task::spawn_blocking(|| {
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).map(|_| answer)
+        }).await
+            .map_err(|e| crate::Error::Tool(format!("Failed to read user input: {}", e)))?
+            .map_err(|e| crate::Error::Tool(format!("Failed to read user input: {}", e)))?;
         let answer = answer.trim().to_string();
         if answer.is_empty() {
             Ok(ToolResult { content: "User did not respond".into(), is_error: false, metadata: None })

@@ -26,7 +26,8 @@ use serde::Deserialize;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use crate::agent::store::{AgentConfigModel, AgentStore};
+use crate::agent::store::AgentConfigModel;
+use crate::session::UnifiedStore;
 use crate::config::OrionConfig;
 use crate::core::agent::{Agent, AgentEvent};
 use crate::core::provider::Provider;
@@ -39,7 +40,7 @@ use crate::tools::registry::ToolRegistry;
 
 /// API 共享状态，通过 `Arc` 在所有 handler 间共享
 pub struct ApiState {
-    pub agent_store: Arc<AgentStore>,
+    pub store: Arc<UnifiedStore>,
     pub config: OrionConfig,
 }
 
@@ -142,8 +143,9 @@ async fn list_agents(
     State(state): State<Arc<ApiState>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     state
-        .agent_store
-        .list()
+        .store
+        .list_agents()
+        .await
         .map(|agents| Json(serde_json::json!(agents)))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -171,8 +173,9 @@ async fn create_agent(
     };
 
     state
-        .agent_store
-        .create(&model)
+        .store
+        .create_agent(&model)
+        .await
         .map(|()| (StatusCode::CREATED, Json(serde_json::json!(model))))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -182,7 +185,7 @@ async fn get_agent(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    match state.agent_store.get(&id) {
+    match state.store.get_agent(&id).await {
         Ok(Some(agent)) => Ok(Json(serde_json::json!(agent))),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -194,7 +197,7 @@ async fn delete_agent(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    match state.agent_store.delete(&id) {
+    match state.store.delete_agent(&id).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -207,7 +210,7 @@ async fn update_agent(
     Path(id): Path<String>,
     Json(body): Json<CreateAgentRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let existing = state.agent_store.get(&id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let existing = state.store.get_agent(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if existing.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -229,8 +232,9 @@ async fn update_agent(
     };
 
     state
-        .agent_store
-        .update(&id, &model)
+        .store
+        .update_agent(&id, &model)
+        .await
         .map(|_| Json(serde_json::json!(model)))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -256,7 +260,7 @@ async fn chat(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
     // 1. 获取 Agent 配置（有 agent_id 从 store 读取，否则用默认配置）
     let agent_config = match &body.agent_id {
-        Some(id) => match state.agent_store.get(id) {
+        Some(id) => match state.store.get_agent(id).await {
             Ok(Some(cfg)) => cfg,
             Ok(None) => return Err(StatusCode::NOT_FOUND),
             Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -307,14 +311,28 @@ async fn rollback_session(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     // 1. 获取需要回滚的动作列表
     let actions = state
-        .agent_store
+        .store
         .rollback_to_turn(&session_id, body.turn_index)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut restored_files = Vec::new();
 
     // 2. 按动作执行文件恢复（后改的先恢复，actions 已按 DESC 排序）
     for action in &actions {
+        // 路径安全检查: target_path 不能指向系统目录
+        let target = std::path::Path::new(&action.target_path);
+        if let Ok(canonical) = target.canonicalize() {
+            let path_str = canonical.to_string_lossy();
+            if path_str.starts_with("/etc")
+                || path_str.starts_with("/usr")
+                || path_str.starts_with("/bin")
+                || path_str.starts_with("/sbin")
+            {
+                continue; // 跳过系统目录
+            }
+        }
+
         match &action.content_before {
             Some(content) => {
                 // 写回文件原始内容
@@ -346,8 +364,9 @@ async fn rollback_session(
 
     // 3. 清理已被回滚的快照
     state
-        .agent_store
-        .cleanup_snapshots_after(&session_id, body.turn_index)
+        .store
+        .cleanup_session_snapshots_after(&session_id, body.turn_index)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({

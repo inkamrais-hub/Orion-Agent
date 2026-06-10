@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 
 // ============================================================
 //  积木: Guardrail (护栏系统)
@@ -186,8 +187,9 @@ impl Guardrail for BudgetGuardrail {
 // ============================================================
 
 /// 护栏链: 积木式组合多个护栏
+#[derive(Clone)]
 pub struct GuardrailChain {
-    guardrails: Vec<Box<dyn Guardrail>>,
+    guardrails: Vec<Arc<dyn Guardrail>>,
 }
 
 impl GuardrailChain {
@@ -195,12 +197,12 @@ impl GuardrailChain {
         Self { guardrails: Vec::new() }
     }
 
-    pub fn add(mut self, guardrail: Box<dyn Guardrail>) -> Self {
+    pub fn add(mut self, guardrail: Arc<dyn Guardrail>) -> Self {
         self.guardrails.push(guardrail);
         self
     }
 
-    pub fn add_all(mut self, guardrails: Vec<Box<dyn Guardrail>>) -> Self {
+    pub fn add_all(mut self, guardrails: Vec<Arc<dyn Guardrail>>) -> Self {
         self.guardrails.extend(guardrails);
         self
     }

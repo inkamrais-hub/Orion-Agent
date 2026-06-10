@@ -311,45 +311,55 @@ fn substitute_env(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // 序列化环境变量测试，防止并行冲突
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn substitute_basic_env_var() {
-        std::env::set_var("ORION_TEST_KEY", "secret123");
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var("ORION_TEST_KEY", "secret123"); }
         let result = substitute_env("api_key: ${ORION_TEST_KEY}");
         assert_eq!(result, "api_key: secret123");
-        std::env::remove_var("ORION_TEST_KEY");
+        unsafe { std::env::remove_var("ORION_TEST_KEY"); }
     }
 
     #[test]
     fn substitute_missing_env_var_keeps_placeholder() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let result = substitute_env("key: ${NONEXISTENT_VAR_XYZ}");
         assert_eq!(result, "key: ${NONEXISTENT_VAR_XYZ}");
     }
 
     #[test]
     fn substitute_no_env_vars() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let result = substitute_env("plain text without vars");
         assert_eq!(result, "plain text without vars");
     }
 
     #[test]
     fn substitute_unclosed_brace() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let result = substitute_env("key: ${unclosed");
         assert_eq!(result, "key: ${unclosed");
     }
 
     #[test]
     fn substitute_multiple_vars() {
-        std::env::set_var("ORION_A", "hello");
-        std::env::set_var("ORION_B", "world");
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var("ORION_A", "hello"); }
+        unsafe { std::env::set_var("ORION_B", "world"); }
         let result = substitute_env("${ORION_A} ${ORION_B}");
         assert_eq!(result, "hello world");
-        std::env::remove_var("ORION_A");
-        std::env::remove_var("ORION_B");
+        unsafe { std::env::remove_var("ORION_A"); }
+        unsafe { std::env::remove_var("ORION_B"); }
     }
 
     #[test]
     fn substitute_dollar_sign_without_brace() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let result = substitute_env("cost is $5");
         assert_eq!(result, "cost is $5");
     }

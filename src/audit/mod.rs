@@ -112,7 +112,10 @@ impl AuditLogger {
 
         // 确保目录存在
         if let Some(parent) = self.file_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log_error!("audit", "Failed to create audit log directory: {}", e);
+                return;
+            }
         }
 
         // 追加写入 JSONL 格式
@@ -125,15 +128,23 @@ impl AuditLogger {
         }
 
         use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.file_path)
         {
-            let _ = file.write_all(content.as_bytes());
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(content.as_bytes()) {
+                    log_error!("audit", "Failed to write audit log: {}", e);
+                    return; // 保留 buffer，下次重试
+                }
+                self.buffer.clear();
+            }
+            Err(e) => {
+                log_error!("audit", "Failed to open audit log file: {}", e);
+                // 保留 buffer，下次重试
+            }
         }
-
-        self.buffer.clear();
     }
 
     /// 查询审计日志
@@ -142,17 +153,24 @@ impl AuditLogger {
             return Vec::new();
         }
 
-        let content = std::fs::read_to_string(&self.file_path).unwrap_or_default();
-        content.lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .rev()
-            .take(limit)
-            .collect()
+        match std::fs::read_to_string(&self.file_path) {
+            Ok(content) => {
+                content.lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .rev()
+                    .take(limit)
+                    .collect()
+            }
+            Err(e) => {
+                log_error!("audit", "Failed to read audit log: {}", e);
+                Vec::new()
+            }
+        }
     }
 
     /// 按会话查询
     pub fn query_by_session(&self, session_id: &str) -> Vec<AuditEntry> {
-        self.query(1000).into_iter()
+        self.query(10_000).into_iter()
             .filter(|e| e.session_id.as_deref() == Some(session_id))
             .collect()
     }

@@ -27,22 +27,22 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> crate::Result<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .or_else(|_| std::env::var("LLM_API_KEY"))
-            .expect("ANTHROPIC_API_KEY or LLM_API_KEY must be set");
+            .map_err(|_| crate::Error::Config("ANTHROPIC_API_KEY or LLM_API_KEY must be set".into()))?;
         let api_base = std::env::var("ANTHROPIC_API_BASE")
             .unwrap_or_else(|_| "https://api.anthropic.com".into());
         let model = std::env::var("ANTHROPIC_MODEL")
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".into());
-        Self::new(&api_base, &api_key, &model)
+        Ok(Self::new(&api_base, &api_key, &model))
     }
 
     pub fn new(api_base: &str, api_key: &str, model: &str) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .expect("Failed to create HTTP client");
+            .unwrap_or_else(|_| Client::new());
         Self {
             client,
             api_base: api_base.trim_end_matches('/').to_string(),
