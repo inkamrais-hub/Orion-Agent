@@ -1,9 +1,19 @@
 # Orion Agent — 问题注意事项与当前状态
 
 **日期**: 2026-06-11
-**分支**: main (未提交改动)
+**分支**: main @ 6bb70af
 **编译状态**: 通过 (0 errors, 57 warnings)
-**测试状态**: 141 tests passed, 0 failed
+**测试状态**: 158 tests passed, 0 failed (含 7 个新增 budget 测试)
+
+---
+
+## 提交历史 (本轮)
+
+| Commit | 内容 |
+|--------|------|
+| 576c0c4 | feat: sandbox mode, gateway refactor, ExecPolicy hardening, code review fixes |
+| 0ba9738 | fix: config provider default, OnceLock cache, clone fixes |
+| 6bb70af | fix: enforce token budget termination + WorkspaceGuard init in run_task_once |
 
 ---
 
@@ -39,47 +49,69 @@ orion-agent --onlyrun "重构这个项目" --sandbox
 - 软件级沙箱无法完全阻止所有网络绕过方式 (如自定义二进制文件)
 - 企业级安全建议使用 Docker 沙箱或虚拟机隔离
 
-### 2. Gateway 硬编码修复
+### 2. Token Budget 强制终止 (新增)
 
-- `prompt_cache: false` → 改为使用 `model_config.prompt_cache`
-- `max_output_tokens: 4096` → 改为使用 `model_config.max_tokens.unwrap_or(4096)`
-- `max_turns: 20` → 提高到 `50` (压测发现 20 轮不够)
-- `run_task_once` 新增 `sandbox` 参数
-- `--onlyrun` 参数恢复兼容
+**动机**: 压测 #2 中模型使用 657K tokens (预算 128K)，循环未终止，77% token 浪费。
 
-### 3. ExecPolicy 安全加固
+**实现**:
+- `LoopState` 新增 `budget_critical_streak: u32` 字段
+- 分级响应策略:
+  - 首次 Critical: 立即触发上下文压缩 (不受 50 消息阈值限制)
+  - 连续 3 轮 Critical: 强制终止，返回 `LoopOutcome::BudgetExceeded`
+  - 状态恢复 Ok/Warning: 重置 streak 计数器
+- `ContextManager` 新增 `force_compact()` 方法 (绕过消息数阈值)
+- 7 个新增单元测试覆盖 budget 逻辑
 
-- 新增 `default_policy` 字段 (默认 Allow，向后兼容)
-- 路径匹配改进: 支持完整路径 (`/usr/bin/rm`) 的文件名提取
-- 参数匹配改进: 逐个参数检查，防止 `rm -r -f /` 绕过 `["-rf", "/"]` 规则
-- config.rs 测试安全: 添加 Mutex 序列化 + `unsafe` 块 (Rust 1.80+ set_var 变为 unsafe)
+### 3. WorkspaceGuard 初始化修复
+
+**动机**: `run_task_once()` 未初始化 WorkspaceGuard，导致所有 bash 命令被 fail-close 拒绝。
+
+**修复**: 在 `run_task_once()` 开头调用 `init_workspace_guard(workspace_root).await`。
+
+### 4. 其他修复
+
+- Gateway 硬编码: `prompt_cache`/`max_output_tokens`/`max_turns` 改用配置值
+- Config provider 默认值: 添加 `#[serde(default = "default_provider")]` 防止解析失败
+- OnceLock config cache: `OrionConfig::load_cached()` 避免热路径重复加载
+- ExecPolicy 安全加固: 路径匹配 + 参数匹配改进
+
+---
+
+## 压测 #2 结果 (DeepSeek v4-flash + 沙箱)
+
+| 指标 | 压测 #1 (MiMo) | 压测 #2 (DeepSeek + 沙箱) |
+|------|----------------|---------------------------|
+| 总耗时 | 136s | 160s |
+| 终止原因 | MaxTurnsReached (20) | 自然完成 |
+| 产出文件 | 5 | 7 (Cargo.toml + 6 .rs) |
+| 编译结果 | 16 errors + 6 warnings | 1 error + 2 warnings |
+| 工具调用成功率 | ~70% | ~95% |
+| Token 消耗 | ~395K | 657K (预算 128K, 5x 超限) |
+| Sandbox 触发 | N/A | 0 次 (模型未尝试网络操作) |
+
+**详细报告**: `F:\测试-agent\STRESS_TEST_REPORT_2.md`
 
 ---
 
 ## 已知未解决问题
 
-### P0 — 必须在下次压测前解决
-
-无。上次 P0 问题 (config provider 默认值、WriteTool 父目录创建) 已在 beta 分支修复。
-
 ### P1 — 高优先级
 
 | # | 问题 | 状态 | 备注 |
 |---|------|------|------|
-| 1 | Token Budget 超限不终止 | 未修复 | budget=32K 但实际用了 395K，循环继续 |
-| 2 | Context Compaction 效果差 | 未修复 | 51→1 条消息只释放 5K tokens |
-| 3 | Prompt Cache 在 --onlyrun 路径未集成 | 部分修复 | prompt_cache 现在正确传递，但 --onlyrun 路径是否使用 PromptBuilder 待验证 |
-| 4 | Config 重复加载 (每次工具调用) | 未修复 | beta 分支的 OnceLock 修复尚未合入 main |
+| 1 | Context Compaction 效果差 | 未修复 | 52→1 条消息只释放 5K tokens，需改进压缩策略 |
+| 2 | UnifiedStore 未在 run_task_once 初始化 | 未修复 | "No UnifiedStore available for snapshot, skipping" 警告 |
+| 3 | Prompt Cache 在 --onlyrun 路径未集成 | 部分修复 | prompt_cache 正确传递，PromptBuilder 三段式待验证 |
 
 ### P2 — 中优先级
 
 | # | 问题 | 状态 | 备注 |
 |---|------|------|------|
-| 5 | 57 个 deprecated API warnings | 未修复 | `core::audit` → `crate::audit`，`session::SessionEntry` → `UnifiedStore` |
-| 6 | Agent 倾向用 bash 替代 read/glob | 未修复 | 可能是 system prompt 引导不足 |
-| 7 | `pub mod core` 与 Rust 内置 core 冲突 | 未修复 | LLM 生成质量问题，可在 system prompt 中提示 |
-| 8 | `get_tool_calls_for_turn` dead code | 未修复 | session/store.rs:441 |
-| 9 | Docker 沙箱 Windows 兼容性 | 待验证 | Docker Desktop daemon 未运行时的降级逻辑已实现 |
+| 4 | 57 个 deprecated API warnings | 未修复 | `core::audit` → `crate::audit`，`session::SessionEntry` → `UnifiedStore` |
+| 5 | 模型使用 Linux 路径 (`/workspace/`) | 未修复 | 需要在 system prompt 中明确 OS 和工作目录 |
+| 6 | `pub mod core` 与 Rust 内置 core 冲突 | 未修复 | LLM 生成质量问题 |
+| 7 | `get_tool_calls_for_turn` dead code | 未修复 | session/store.rs:441 |
+| 8 | Docker 沙箱 Windows 兼容性 | 待验证 | Docker Desktop daemon 未运行时的降级逻辑 |
 
 ---
 
@@ -87,17 +119,16 @@ orion-agent --onlyrun "重构这个项目" --sandbox
 
 | 分支 | 最新 Commit | 内容 |
 |------|-------------|------|
-| main | 34083e1 + 未提交改动 | code review 修复 + 沙箱模式 + gateway 重构 |
+| main | 6bb70af | 沙箱模式 + gateway 重构 + budget 强制终止 + WorkspaceGuard 修复 |
 | beta | d16295d | 架构改进 + UnifiedStore + 死代码清理 + 压测修复 |
-
-**注意**: beta 分支的 OnceLock config cache 修复尚未合入 main。下次合并时需注意冲突。
 
 ---
 
 ## 下一步计划
 
-1. 提交 main 分支当前改动
-2. 无网络沙箱模式下重跑压测 (DeepSeek v4-flash)
-3. 根据压测结果修复 P1 问题 (Token Budget 强制终止、Context Compaction 优化)
-4. 合并 beta 分支改动到 main
-5. 清理 deprecated API (57 warnings → 0)
+1. **Context Compaction 优化**: 改进压缩策略，每 10 轮定期压缩而非仅在阈值时触发
+2. **UnifiedStore 初始化**: 在 `run_task_once()` 中初始化 store 以支持快照/回滚
+3. **合并 beta 分支**: 将 beta 分支的架构改进合入 main
+4. **清理 deprecated warnings**: 57 → 0 (core::audit + session types)
+5. **System prompt 改进**: 增加 OS/路径信息、Rust 保留字提示
+6. **重跑压测**: 验证 budget 强制终止是否生效
