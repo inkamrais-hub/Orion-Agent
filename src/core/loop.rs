@@ -548,8 +548,12 @@ pub struct ContextManager<'a> {
     provider: Option<&'a dyn crate::core::provider::Provider>,
     model: &'a str,
     cache_tracker: &'a mut crate::core::cache::CacheBreakTracker,
-    /// 触发压缩的消息数量阈值
+    /// 触发压缩的消息数量阈值 (降低到 20，避免上下文膨胀)
     threshold: usize,
+    /// 上次压缩时的轮次 (用于定期压缩)
+    last_compact_turn: u64,
+    /// 定期压缩间隔 (每 N 轮强制压缩一次)
+    periodic_interval: u64,
 }
 
 impl<'a> ContextManager<'a> {
@@ -559,13 +563,37 @@ impl<'a> ContextManager<'a> {
         model: &'a str,
         cache_tracker: &'a mut crate::core::cache::CacheBreakTracker,
     ) -> Self {
-        Self { provider, model, cache_tracker, threshold: 50 }
+        Self {
+            provider, model, cache_tracker,
+            threshold: 20,          // 从 50 降到 20，更早触发压缩
+            last_compact_turn: 0,
+            periodic_interval: 10,  // 每 10 轮强制压缩一次
+        }
     }
 
     /// 检查消息数量，超过阈值时自动压缩
     /// 使用 Auto 策略（LLM 摘要），失败时回退到 Micro 策略
     pub async fn check_and_compact(&mut self, messages: &mut Vec<Message>) {
         if messages.len() > self.threshold {
+            self.compact_with_fallback(messages).await;
+        }
+    }
+
+    /// 检查是否需要定期压缩 (基于轮次间隔)
+    pub async fn check_periodic_compact(
+        &mut self,
+        messages: &mut Vec<Message>,
+        current_turn: u64,
+    ) {
+        if current_turn > 0
+            && current_turn - self.last_compact_turn >= self.periodic_interval
+            && messages.len() > 5
+        {
+            info!(
+                "Periodic compaction: turn={}, messages={}, interval={}",
+                current_turn, messages.len(), self.periodic_interval
+            );
+            self.last_compact_turn = current_turn;
             self.compact_with_fallback(messages).await;
         }
     }
@@ -978,11 +1006,12 @@ pub async fn run_simple_loop(
         state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::ToolResultChange);
         debug!("CacheBreak: ToolResultChange");
 
-        // 上下文压缩: 消息过多时压缩 — 使用 ContextManager
+        // 上下文压缩: 消息过多时压缩 + 定期压缩 (每 10 轮)
         // 注: 此处使用直接字段借用，因为 ContextManager 同时需要 &mut cache_tracker 和 &mut messages，
         //     通过字段直接借用 Rust 可自动 split-borrow (方法返回的借用则不会 split)
         let mut ctx_mgr = ContextManager::new(Some(provider), model, &mut state.cache_tracker);
         ctx_mgr.check_and_compact(&mut state.messages).await;
+        ctx_mgr.check_periodic_compact(&mut state.messages, state.turn_number).await;
 
         tokio::task::yield_now().await;
     }

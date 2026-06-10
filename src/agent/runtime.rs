@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::agent::{AgentId, SessionId};
-use crate::core::audit::{AuditLogger, AuditEvent};
+use crate::audit::{AuditLogger, AuditEvent};
 use crate::core::provider::Provider;
 use crate::core::guardrail::GuardrailChain;
 use crate::core::context::ContextManager;
@@ -58,17 +58,15 @@ impl AgentRuntime {
         }
     }
 
-    /// 启用审计日志
-    pub async fn enable_audit(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
-        let logger = AuditLogger::create(path).await?;
-        self.audit = Some(logger);
-        Ok(())
+    /// 启用审计日志 (新 API: 同步缓冲写入)
+    pub fn enable_audit(&mut self) {
+        self.audit = Some(AuditLogger::new());
     }
 
     /// 记录审计事件
-    pub async fn record_audit(&mut self, event: AuditEvent) {
+    pub fn record_audit(&mut self, event: AuditEvent) {
         if let Some(audit) = &mut self.audit {
-            let _ = audit.record(event).await;
+            audit.log(event, "agent_runtime");
         }
     }
 }

@@ -51,7 +51,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
     };
 
     // 使用统一的构建函数创建 Agent 实例
-    let agent = crate::gateway::build_main_agent(&config, false).await?;
+    let agent = crate::gateway::build_main_agent(&config, false, Some(store.clone())).await?;
     let memory = SessionMemory::load();
 
     let mut state = ChatState {
@@ -391,7 +391,7 @@ async fn handle_command(
                         if let Err(e) = config.save() {
                             return CmdResult::Error(format!("保存配置失败: {}", e));
                         }
-                        match crate::gateway::build_main_agent(&config, false).await {
+                        match crate::gateway::build_main_agent(&config, false, Some(state.store.clone())).await {
                             Ok(new_agent) => {
                                 state.agent = new_agent;
                                 state.config = config;

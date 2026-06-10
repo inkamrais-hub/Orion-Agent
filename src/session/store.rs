@@ -438,6 +438,7 @@ impl SessionStore {
     }
 
     /// 获取 Turn 的工具调用
+    #[allow(dead_code)]
     fn get_tool_calls_for_turn(&self, turn_id: &str) -> crate::Result<Vec<ToolCallRecord>> {
         let conn = self.conn.lock().unwrap_or_else(|poisoned| {
             tracing::warn!("SQLite mutex was poisoned, recovering");

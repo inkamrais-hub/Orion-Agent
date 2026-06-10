@@ -82,9 +82,11 @@ pub async fn run_gateway() -> crate::Result<()> {
 /// 构建主 Agent 实例，包含默认工具、缓存、Hook 引擎和安全策略
 ///
 /// `sandbox` 为 true 时启用无网络沙箱模式，禁止 git push/fetch/clone 及所有网络命令
+/// `store` 可选传入 UnifiedStore，用于文件操作快照/回滚
 pub async fn build_main_agent(
     config: &crate::config::OrionConfig,
     sandbox: bool,
+    store: Option<Arc<crate::session::UnifiedStore>>,
 ) -> crate::Result<crate::core::agent::Agent> {
     let model_config = config.active_model();
 
@@ -129,6 +131,11 @@ pub async fn build_main_agent(
     // 连接配置中的 MCP server 并注入工具
     crate::tools::mcp_init::init_mcp_tools(config, &mut tools).await;
 
+    // 注入 UnifiedStore (用于文件操作快照/回滚)
+    if let Some(store) = store {
+        tools.set_store(store);
+    }
+
     let cache = crate::core::cache::GlobalCache::new(1000, 300, 10000);
     let system_prompt = crate::cli::execute::build_system_prompt(&tools);
 
@@ -170,11 +177,12 @@ pub async fn run_task_once(
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     crate::core::workspace::init_workspace_guard(workspace_root).await;
 
-    let agent = build_main_agent(config, sandbox).await?;
-
-    // 创建 Session
+    // 创建 UnifiedStore + Session (在 agent 构建前，以便注入到 ToolRegistry)
+    let store = Arc::new(crate::session::UnifiedStore::open().await?);
     let session_id = crate::session::store::generate_session_id();
-    let store = crate::session::UnifiedStore::open().await?;
+
+    let agent = build_main_agent(config, sandbox, Some(store.clone())).await?;
+
     let _ = store.create_session(&crate::session::store::SessionMeta {
         session_id: session_id.clone(),
         agent_name: agent.config().name.clone(),
@@ -228,10 +236,32 @@ pub async fn run_task_once(
 
     match outcome {
         crate::core::r#loop::LoopOutcome::Completed { message, usage } => {
-            tracing::info!("任务完成 tokens={}", usage.input_tokens + usage.output_tokens);
+            let total = usage.input_tokens + usage.output_tokens;
+            tracing::info!("任务完成 tokens={} (in={} out={})", total, usage.input_tokens, usage.output_tokens);
             Ok(message)
         }
-        other => Ok(format!("{:?}", other)),
+        crate::core::r#loop::LoopOutcome::BudgetExceeded { usage } => {
+            let total = usage.input_tokens + usage.output_tokens;
+            tracing::warn!("任务因 Token 预算超限终止: in={} out={} total={}", usage.input_tokens, usage.output_tokens, total);
+            Ok(format!(
+                "[Token 预算超限] 已使用 {}K tokens (输入 {}K + 输出 {}K)。任务已终止。\n\
+                 建议: 1) 增加 token_budget 配置; 2) 使用更简洁的任务描述; 3) 检查 context compaction 是否生效。",
+                total / 1000, usage.input_tokens / 1000, usage.output_tokens / 1000
+            ))
+        }
+        crate::core::r#loop::LoopOutcome::MaxTurnsReached { message, usage } => {
+            let total = usage.input_tokens + usage.output_tokens;
+            tracing::info!("任务达到最大轮次: {} (tokens={})", message, total);
+            Ok(format!("[达到最大轮次] {} (已使用 {}K tokens)", message, total / 1000))
+        }
+        crate::core::r#loop::LoopOutcome::GuardrailDenied { reason } => {
+            tracing::warn!("任务被护栏拦截: {}", reason);
+            Ok(format!("[护栏拦截] {}", reason))
+        }
+        crate::core::r#loop::LoopOutcome::Error { message } => {
+            tracing::error!("任务执行出错: {}", message);
+            Ok(format!("[错误] {}", message))
+        }
     }
 }
 
@@ -240,10 +270,23 @@ pub async fn run_onlyrun(task: String, sandbox: bool) -> crate::Result<()> {
     crate::logging::init_logging();
 
     let config = crate::config::OrionConfig::load();
+    let model_name = config.default_model.clone();
+    let model_config = config.active_model();
+    let budget = model_config.max_input_tokens.unwrap_or(128_000);
+
+    log_info!("gateway", "🚀 Orion Agent 启动");
+    log_info!("gateway", "   模型: {}", model_name);
+    log_info!("gateway", "   Token 预算: {}K", budget / 1000);
     if sandbox {
-        log_info!("gateway", "🔒 沙箱模式: 网络操作和 VCS 写操作已禁止");
+        log_info!("gateway", "   🔒 沙箱模式: 网络操作和 VCS 写操作已禁止");
     }
+    log_info!("gateway", "   任务: {}", &task[..task.len().min(100)]);
+
+    let start = std::time::Instant::now();
     let message = run_task_once(&task, &config, None, sandbox).await?;
-    println!("{}", message);
+    let elapsed = start.elapsed();
+
+    println!("\n{}", message);
+    log_info!("gateway", "⏱️  总耗时: {:.1}s", elapsed.as_secs_f64());
     Ok(())
 }

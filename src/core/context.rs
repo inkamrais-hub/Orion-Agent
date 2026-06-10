@@ -197,6 +197,12 @@ pub async fn compact_context_with_llm(
     let before = messages.len();
     if before <= 2 { return None; }
 
+    // 计算压缩前的内容总长度 (用于估算 tokens_freed)
+    let before_content_len: usize = messages.iter()
+        .flat_map(|m| m.content.iter())
+        .map(|b| content_block_len(b))
+        .sum();
+
     // Track whether LLM-dependent compaction actually succeeded.
     // If call_llm_summary returns None, we must not report success.
     let mut llm_compaction_succeeded = true;
@@ -315,7 +321,14 @@ pub async fn compact_context_with_llm(
     }
 
     let after = messages.len();
-    let tokens_freed = ((before - after) * 100) as u64; // 估算
+    // 计算压缩后的内容总长度
+    let after_content_len: usize = messages.iter()
+        .flat_map(|m| m.content.iter())
+        .map(|b| content_block_len(b))
+        .sum();
+    // 改进的 tokens 估算: 基于消息内容长度而非固定值
+    let tokens_freed = estimate_tokens(before_content_len)
+        .saturating_sub(estimate_tokens(after_content_len));
     Some(CompactionResult {
         strategy: *strategy,
         messages_before: before,
@@ -323,6 +336,23 @@ pub async fn compact_context_with_llm(
         tokens_freed,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+/// 粗略估算 tokens (4 字符 ≈ 1 token)
+fn estimate_tokens(char_count: usize) -> u64 {
+    (char_count / 4) as u64
+}
+
+/// 计算 ContentBlock 的字符长度
+fn content_block_len(block: &crate::core::provider::ContentBlock) -> usize {
+    use crate::core::provider::ContentBlock;
+    match block {
+        ContentBlock::Text { text } => text.len(),
+        ContentBlock::ToolUse { input, .. } => input.to_string().len(),
+        ContentBlock::ToolResult { content, .. } => content.len(),
+        ContentBlock::Thinking { text } => text.len(),
+        ContentBlock::Image { .. } => 1000, // 图片估算为 1000 字符
+    }
 }
 
 /// 清理消息格式: 确保没有孤立的 Tool 消息，且消息角色交替正确

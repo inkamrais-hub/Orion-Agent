@@ -57,14 +57,16 @@ pub fn build_system_prompt_static() -> String {
     prompt
 }
 
-/// 构建动态上下文 (每次请求变化的部分)
+/// 构建动态上下文 (每次请求变化的部分 — OS, Shell, CWD, 项目类型提示)
 pub fn build_dynamic_context() -> String {
     let mut ctx = String::new();
     let os = std::env::consts::OS;
-    let shell = if cfg!(windows) { "cmd /C (batch)" } else { "sh -c" };
+    let shell = if cfg!(windows) { "PowerShell / cmd" } else { "bash / sh" };
     let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "(unknown)".into());
-    ctx.push_str("[Context]\n");
+    ctx.push_str("[Runtime Environment]\n");
     ctx.push_str(&format!("OS: {} | Shell: {} | CWD: {}\n", os, shell, cwd));
+
+    // Windows 驱动器列表
     if cfg!(windows) {
         let mut drives = Vec::new();
         for letter in b'A'..=b'Z' {
@@ -73,13 +75,36 @@ pub fn build_dynamic_context() -> String {
         }
         if !drives.is_empty() { ctx.push_str(&format!("Drives: {}\n", drives.join(", "))); }
     }
+
+    // 项目类型检测 — 给模型有用的上下文提示
+    let cwd_path = std::path::Path::new(&cwd);
+    let mut hints: Vec<&str> = Vec::new();
+    if cwd_path.join("Cargo.toml").exists() {
+        hints.push("Rust project detected. Use `cargo check` to verify compilation, `cargo test` to run tests, `cargo clippy` for linting.");
+        hints.push("IMPORTANT: Do NOT use `pub mod core;` — it shadows Rust's built-in `core` crate. Rename to `pub mod core_mod;` or similar.");
+    }
+    if cwd_path.join("package.json").exists() {
+        hints.push("Node.js project detected. Use `npm run build` / `npm test` to verify.");
+    }
+    if cwd_path.join("pyproject.toml").exists() || cwd_path.join("setup.py").exists() {
+        hints.push("Python project detected. Use `python -m pytest` to test, `ruff check` for linting.");
+    }
+    if !hints.is_empty() {
+        ctx.push_str("\n[Project Hints]\n");
+        for h in &hints {
+            ctx.push_str(&format!("- {}\n", h));
+        }
+    }
+
     ctx.push('\n');
     ctx
 }
 
-/// 兼容旧接口
+/// 兼容旧接口 — 拼接静态 prompt + 动态运行时上下文
 pub fn build_system_prompt(_tools: &ToolRegistry) -> String {
-    build_system_prompt_static()
+    let mut prompt = build_system_prompt_static();
+    prompt.push_str(&build_dynamic_context());
+    prompt
 }
 
 /// 创建默认的 CLI 事件回调 — 负责终端 UI 渲染
@@ -216,10 +241,17 @@ pub async fn execute_turn(
             tracing::info!(input = usage.input_tokens, output = usage.output_tokens, "Turn completed");
             message
         }
-        LoopOutcome::MaxTurnsReached { message, .. } => format!("[Max turns] {}", message),
-        LoopOutcome::Error { message } => format!("[Error] {}", message),
-        LoopOutcome::BudgetExceeded { .. } => "[Budget exceeded]".to_string(),
-        LoopOutcome::GuardrailDenied { reason } => format!("[Guardrail] {}", reason),
+        LoopOutcome::MaxTurnsReached { message, usage } => {
+            format!("[达到最大轮次] {} (已使用 {}K tokens)", message, (usage.input_tokens + usage.output_tokens) / 1000)
+        }
+        LoopOutcome::Error { message } => format!("[错误] {}", message),
+        LoopOutcome::BudgetExceeded { usage } => {
+            format!(
+                "[Token 预算超限] 已使用 {}K tokens。建议增加 token_budget 或使用更简洁的任务描述。",
+                (usage.input_tokens + usage.output_tokens) / 1000
+            )
+        }
+        LoopOutcome::GuardrailDenied { reason } => format!("[护栏拦截] {}", reason),
     };
 
     store.append_transcript(session_id, &TranscriptEntry {

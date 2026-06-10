@@ -4,6 +4,7 @@
 //! 旧的 SessionManager (JSONL) / SessionStore / AgentStore 已废弃，
 //! 保留仅供向后兼容，新代码请统一使用 `UnifiedStore`。
 
+#[allow(deprecated)]
 pub mod manager;
 pub mod memory;
 pub mod store;
@@ -23,6 +24,7 @@ use chrono::{DateTime, Utc};
 /// Session 元数据 (旧版，仅供 SessionManager 兼容使用)
 #[deprecated(since = "0.2.0", note = "Use session::store::SessionMeta or UnifiedStore instead")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(deprecated)]
 pub struct SessionEntry {
     pub session_id: String,
     pub created_at: DateTime<Utc>,
