@@ -13,6 +13,7 @@ pub struct ModelConfig {
     /// 模型名称 (如 "deepseek-chat", "qwen-plus")
     pub name: String,
     /// Provider 类型 (如 "openai-compat", "anthropic")
+    #[serde(default = "default_provider")]
     pub provider: String,
     /// API 端点
     pub endpoint: String,
@@ -40,6 +41,7 @@ pub struct ModelConfig {
     pub timeout_secs: u64,
 }
 
+fn default_provider() -> String { "openai".into() }
 fn default_modalities() -> Vec<String> { vec!["text".into()] }
 fn default_timeout() -> u64 { 120 }
 

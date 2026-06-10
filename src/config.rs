@@ -66,12 +66,18 @@ impl OrionConfig {
                         return config;
                     }
                     Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "配置解析失败，使用默认配置");
+                        tracing::error!(path = %path.display(), error = %e, "配置解析失败，使用默认配置");
                     }
                 }
             }
         }
         Self::default()
+    }
+
+    /// 缓存版本: 只加载一次，后续直接返回引用
+    pub fn load_cached() -> &'static OrionConfig {
+        static CONFIG_CACHE: std::sync::OnceLock<OrionConfig> = std::sync::OnceLock::new();
+        CONFIG_CACHE.get_or_init(|| Self::load())
     }
 
     /// 从指定路径加载

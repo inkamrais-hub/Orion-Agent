@@ -345,7 +345,7 @@ impl Tool for BashTool {
         }
 
         // ── Docker 沙箱模式 ──────────────────────────────────
-        let config = crate::config::OrionConfig::load();
+        let config = crate::config::OrionConfig::load_cached();
         if config.docker.enabled {
             use docker_executor::{DockerExecutor, DockerExecutorConfig};
 
@@ -354,12 +354,12 @@ impl Tool for BashTool {
                 tracing::warn!("Docker enabled but not available, falling back to local execution");
             } else {
                 let executor = DockerExecutor::new(DockerExecutorConfig {
-                    image: config.docker.image,
-                    workdir: config.docker.workdir,
+                    image: config.docker.image.clone(),
+                    workdir: config.docker.workdir.clone(),
                     auto_pull: config.docker.auto_pull,
-                    network: config.docker.network,
-                    memory_limit: config.docker.memory_limit,
-                    cpu_limit: config.docker.cpu_limit,
+                    network: config.docker.network.clone(),
+                    memory_limit: config.docker.memory_limit.clone(),
+                    cpu_limit: config.docker.cpu_limit.clone(),
                 });
 
                 return match executor.execute(cmd, timeout_secs).await {
