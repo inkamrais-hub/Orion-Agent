@@ -144,6 +144,7 @@ pub struct ExecutionState {
 /// 工具执行错误
 ///
 /// - `GuardrailDenied` / `HookBlocked` / `PolicyForbidden`: 非致命, 调用方应继续
+/// - `Replan`: 非致命, 调用方应注入 hint 系统消息后继续
 /// - `EarlyStop` / `MaxToolCallsExceeded`: 致命, 调用方应终止循环
 #[derive(Debug, Clone)]
 pub enum ToolExecutorError {
@@ -165,6 +166,8 @@ pub enum ToolExecutorError {
         tool_name: String,
         command: String,
     },
+    /// StepObserver 建议 Replan (非致命, 调用方注入 hint 后继续)
+    Replan(String),
     /// StepObserver 建议 EarlyStop (致命)
     EarlyStop(String),
     /// 超过最大工具调用数 (致命)
@@ -369,11 +372,8 @@ impl ToolExecutor {
         let (mut result, cache_hit) = self.execute_with_cache(&call.tool_name, &call.input).await;
         let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
-        // 7. StepObserver
-        let observer_action = {
-            let mut observer = self.observer.lock().await;
-            observer.observe(&call.tool_name, &mut result)
-        };
+        // 7. StepObserver (含 Retry 循环)
+        let observer_action = self.run_observer_with_retry(&call, &mut result).await;
 
         // 8. 审计
         {
@@ -409,9 +409,15 @@ impl ToolExecutor {
             );
         }
 
-        // 12. StepObserver EarlyStop 处理
-        if let ObserveAction::EarlyStop { reason } = observer_action {
-            return Err(ToolExecutorError::EarlyStop(reason));
+        // 12. StepObserver Replan / EarlyStop 处理
+        match observer_action {
+            Some(ObserveAction::Replan { hint }) => {
+                return Err(ToolExecutorError::Replan(hint));
+            }
+            Some(ObserveAction::EarlyStop { reason }) => {
+                return Err(ToolExecutorError::EarlyStop(reason));
+            }
+            _ => {}
         }
 
         Ok(ToolExecutionOutcome {
@@ -429,16 +435,11 @@ impl ToolExecutor {
     pub async fn execute_serial(
         &self,
         calls: Vec<PendingToolCall>,
+        turn_ctx: &TurnContext,
     ) -> Vec<Result<ToolExecutionOutcome, ToolExecutorError>> {
         let mut outcomes = Vec::new();
         for call in &calls {
-            let turn_ctx = TurnContext {
-                turn_number: self.config.turn_number.unwrap_or(0),
-                tool_call_count: 0,
-                total_input_tokens: 0,
-                total_output_tokens: 0,
-            };
-            outcomes.push(self.execute_full(call, &turn_ctx).await);
+            outcomes.push(self.execute_full(call, turn_ctx).await);
         }
         outcomes
     }
@@ -449,20 +450,26 @@ impl ToolExecutor {
     pub async fn execute_parallel(
         self: Arc<Self>,
         calls: Vec<PendingToolCall>,
+        turn_ctx: &TurnContext,
     ) -> Vec<Result<ToolExecutionOutcome, ToolExecutorError>> {
         use futures::future::join_all;
+
+        let turn_number = turn_ctx.turn_number;
+        let tool_call_count = turn_ctx.tool_call_count;
+        let total_input_tokens = turn_ctx.total_input_tokens;
+        let total_output_tokens = turn_ctx.total_output_tokens;
 
         let mut handles = Vec::new();
         for call in calls {
             let executor = Arc::clone(&self);
             handles.push(async move {
-                let turn_ctx = TurnContext {
-                    turn_number: executor.config.turn_number.unwrap_or(0),
-                    tool_call_count: 0,
-                    total_input_tokens: 0,
-                    total_output_tokens: 0,
+                let tc = TurnContext {
+                    turn_number,
+                    tool_call_count,
+                    total_input_tokens,
+                    total_output_tokens,
                 };
-                executor.execute_full(&call, &turn_ctx).await
+                executor.execute_full(&call, &tc).await
             });
         }
         join_all(handles).await
@@ -525,6 +532,34 @@ impl ToolExecutor {
             },
         };
         (result, false)
+    }
+
+    /// StepObserver 循环 (含 Retry 重试)
+    ///
+    /// 观察结果 → 如果 Retry 则重新执行 → 再次观察, 直到遇到非 Retry 的 action
+    /// 返回 `Some(action)` 需要调用方处理 (Replan / EarlyStop / Continue)
+    async fn run_observer_with_retry(
+        &self,
+        call: &PendingToolCall,
+        result: &mut ToolResult,
+    ) -> Option<ObserveAction> {
+        loop {
+            let action = {
+                let mut observer = self.observer.lock().await;
+                observer.observe(&call.tool_name, result)
+            };
+            match action {
+                ObserveAction::Continue => return None,
+                ObserveAction::Retry => {
+                    tracing::info!("StepObserver retry: tool '{}'", call.tool_name);
+                    let (retry_result, _) = self.execute_with_cache(&call.tool_name, &call.input).await;
+                    *result = retry_result;
+                    // 继续循环, 再次观察
+                }
+                ObserveAction::Replan { hint: _ } => return Some(action),
+                ObserveAction::EarlyStop { reason: _ } => return Some(action),
+            }
+        }
     }
 
     /// 发射 ToolStart 事件

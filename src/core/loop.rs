@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::audit::{AuditEvent as GlobalAuditEvent, AUDIT_LOGGER};
 use futures::future::join_all;
 use tracing::{debug, info};
@@ -448,7 +450,7 @@ pub struct LoopState {
     /// 当前目标 ID
     pub current_goal_id: Option<String>,
     /// 步骤观察器
-    pub observer: StepObserver,
+    pub observer: Arc<tokio::sync::Mutex<StepObserver>>,
     /// 缓存断点跟踪器
     pub cache_tracker: crate::core::cache::CacheBreakTracker,
 }
@@ -463,7 +465,7 @@ impl LoopState {
             total_usage: UsageInfo::default(),
             token_budget_tracker: TokenBudget::new(token_budget, token_budget),
             current_goal_id: None,
-            observer: StepObserver::new(),
+            observer: Arc::new(tokio::sync::Mutex::new(StepObserver::new())),
             cache_tracker: crate::core::cache::CacheBreakTracker::new(),
         }
     }
@@ -518,11 +520,6 @@ impl LoopState {
     /// 借写消息历史
     pub fn messages_mut(&mut self) -> &mut Vec<Message> {
         &mut self.messages
-    }
-
-    /// 借写步骤观察器
-    pub fn observer_mut(&mut self) -> &mut StepObserver {
-        &mut self.observer
     }
 
     /// 借写缓存断点跟踪器
@@ -612,9 +609,7 @@ pub async fn run_simple_loop<'a>(
     let max_turns = config.max_turns;
     let max_tool_calls = config.max_tool_calls;
     let token_budget = config.token_budget;
-    let agent_id = config.agent_id.clone();
     let model_caps = Some(config.model_caps.clone());
-    let agent_id = if agent_id.is_empty() { "simple_loop".to_string() } else { agent_id };
 
     // 初始化循环状态 (集中管理所有可变状态)
     let mut state = LoopState::new(token_budget);
@@ -790,7 +785,11 @@ pub async fn run_simple_loop<'a>(
 
         // 处理工具调用 (含 StepObserver 观察 + 并行执行)
         // 判断是否可以并行执行 (所有工具都是只读)
-        let all_readonly = are_tools_readonly(&acc_tools);
+        // 构建工具执行器配置 (静态 execute_single_tool 所需, 每轮重新构造)
+        let exec_config = crate::core::tool_executor::ToolExecutorConfig::basic(
+            config.session_id.clone(), config.agent_id.clone(), registry.clone(),
+        );
+        let all_readonly = crate::core::tool_executor::are_tools_readonly(&acc_tools);
 
         if all_readonly && acc_tools.len() > 1 {
             // 并行执行只读工具
@@ -798,38 +797,19 @@ pub async fn run_simple_loop<'a>(
             for (tool_call_id, tool_name, input) in &acc_tools {
                 state.increment_tool_call();
 
-                // 护栏检查
-                if let Some(ref gc) = guardrails {
+                // 护栏检查 (使用 helper 消除代码重复)
+                {
                     let turn_ctx = crate::core::guardrail::TurnContext {
                         turn_number: state.turn(),
                         tool_call_count: state.tool_call_count,
                         total_input_tokens: state.total_usage.input_tokens,
                         total_output_tokens: state.total_usage.output_tokens,
                     };
-                    match gc.check_tool(&turn_ctx, tool_name, input).await {
-                        crate::core::guardrail::GuardResult::Allow => {},
-                        crate::core::guardrail::GuardResult::Deny(reason) => {
-                            let error_result = crate::tools::ToolResult {
-                                content: format!("Guardrail denied: {}", reason),
-                                is_error: true,
-                                metadata: None,
-                            };
-                            state.add_message(Message {
-                                role: Role::Tool,
-                                content: vec![ContentBlock::ToolResult {
-                                    tool_name: tool_name.clone(),
-                                    content: error_result.content,
-                                    is_error: true,
-                                    tool_call_id: tool_call_id.clone(),
-                                }],
-                                reasoning_content: None,
-                                cache_breakpoint: false,
-                            });
-                            continue;
-                        },
-                        crate::core::guardrail::GuardResult::Skip => {
-                            continue;
-                        },
+                    if let Some(msg) = check_guardrail_tool(
+                        guardrails, &turn_ctx, tool_name, input, tool_call_id
+                    ).await {
+                        state.add_message(msg);
+                        continue;
                     }
                 }
 
@@ -844,44 +824,17 @@ pub async fn run_simple_loop<'a>(
                 let tc_id = tool_call_id.clone();
                 let tn = tool_name.clone();
                 let inp = input.clone();
-                let tools_ref = &tools;
-                let cache_ref = &cache;
-                let registry_ref = registry.clone();
-                let agent_id_ref = agent_id.clone();
                 let turn_for_task = state.turn();
+                let registry_clone = registry.clone();
 
                 handles.push(async move {
-                    let start_time = std::time::Instant::now();
-                    let cache_key = crate::core::cache::ToolCacheKey {
-                        tool_name: tn.clone(),
-                        input_hash: crate::core::cache::compute_input_hash(&tn, &inp),
-                    };
-                    let result = if let Some(cached_val) = cache_ref.get_tool_result(&cache_key).await {
-                        crate::tools::ToolResult { content: cached_val, is_error: false, metadata: None }
-                    } else {
-                        let tool_ctx = crate::tools::ToolContext {
-                            session_id: config.session_id.clone(),
-                            working_dir: std::env::current_dir()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_else(|_| ".".into()),
-                            turn_number: turn_for_task,
-                            agent_id: agent_id_ref.clone(),
-                            registry: registry_ref,
-                        };
-                        match tools_ref.execute(&tn, inp.clone(), &tool_ctx).await {
-                            Ok(res) => {
-                                if !res.is_error {
-                                    cache_ref.set_tool_result(cache_key, res.content.clone(), &inp).await;
-                                }
-                                res
-                            }
-                            Err(e) => crate::tools::ToolResult {
-                                content: format!("Tool error: {}", e), is_error: true, metadata: None,
-                            },
-                        }
-                    };
-                    let elapsed = start_time.elapsed().as_millis() as u64;
-                    (tc_id, tn, result, elapsed)
+                    let ec = crate::core::tool_executor::ToolExecutorConfig::basic(
+                        config.session_id.clone(), config.agent_id.clone(), registry_clone,
+                    );
+                    let output = crate::core::tool_executor::ToolExecutor::execute_single_tool(
+                        tools, cache, &ec, &tn, &inp, turn_for_task,
+                    ).await;
+                    (tc_id, tn, output.result, output.duration_ms)
                 });
             }
 
@@ -890,7 +843,10 @@ pub async fn run_simple_loop<'a>(
             let mut early_stop_reason: Option<String> = None;
             for (tc_id, tn, mut result, elapsed) in results {
                 // StepObserver: 评估并行工具结果
-                let observe_action = state.observer_mut().observe(&tn, &mut result);
+                let observe_action = {
+                    let mut obs = state.observer.lock().await;
+                    obs.observe(&tn, &mut result)
+                };
                 match observe_action {
                     ObserveAction::Continue => {}
                     ObserveAction::Retry => {
@@ -921,17 +877,9 @@ pub async fn run_simple_loop<'a>(
                         duration_ms: elapsed,
                     });
                 }
-                state.add_message(Message {
-                    role: Role::Tool,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_name: tn,
-                        content: result.content,
-                        is_error: result.is_error,
-                        tool_call_id: tc_id,
-                    }],
-                    reasoning_content: None,
-                    cache_breakpoint: false,
-                });
+                state.add_message(build_tool_result_message(
+                    &tc_id, &tn, &result.content, result.is_error,
+                ));
             }
             // EarlyStop: 提前终止整个循环
             if let Some(reason) = early_stop_reason {
@@ -947,38 +895,19 @@ pub async fn run_simple_loop<'a>(
         for (tool_call_id, tool_name, input) in &acc_tools {
             state.increment_tool_call();
 
-            // 护栏检查
-            if let Some(ref gc) = guardrails {
+            // 护栏检查 (使用 helper 消除代码重复)
+            {
                 let turn_ctx = crate::core::guardrail::TurnContext {
                     turn_number: state.turn(),
                     tool_call_count: state.tool_call_count,
                     total_input_tokens: state.total_usage.input_tokens,
                     total_output_tokens: state.total_usage.output_tokens,
                 };
-                match gc.check_tool(&turn_ctx, tool_name, input).await {
-                    crate::core::guardrail::GuardResult::Allow => {},
-                    crate::core::guardrail::GuardResult::Deny(reason) => {
-                        let error_result = crate::tools::ToolResult {
-                            content: format!("Guardrail denied: {}", reason),
-                            is_error: true,
-                            metadata: None,
-                        };
-                        state.add_message(Message {
-                            role: Role::Tool,
-                            content: vec![ContentBlock::ToolResult {
-                                tool_name: tool_name.clone(),
-                                content: error_result.content,
-                                is_error: true,
-                                tool_call_id: tool_call_id.clone(),
-                            }],
-                            reasoning_content: None,
-                            cache_breakpoint: false,
-                        });
-                        continue;
-                    },
-                    crate::core::guardrail::GuardResult::Skip => {
-                        continue;
-                    },
+                if let Some(msg) = check_guardrail_tool(
+                    guardrails, &turn_ctx, tool_name, input, tool_call_id
+                ).await {
+                    state.add_message(msg);
+                    continue;
                 }
             }
 
@@ -1060,68 +989,27 @@ pub async fn run_simple_loop<'a>(
                 };
             }
 
-            let start_time = std::time::Instant::now();
-            let current_turn = state.turn();
-
-            // Check global cache
-            let cache_key = crate::core::cache::ToolCacheKey {
-                tool_name: tool_name.clone(),
-                input_hash: crate::core::cache::compute_input_hash(tool_name, input),
-            };
-
-            let mut result = if let Some(cached_val) = cache.get_tool_result(&cache_key).await {
-                crate::tools::ToolResult { content: cached_val, is_error: false, metadata: None }
-            } else {
-                let tool_ctx = crate::tools::ToolContext {
-                    session_id: config.session_id.clone(),
-                    working_dir: std::env::current_dir()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| ".".into()),
-                    turn_number: current_turn,
-                    agent_id: agent_id.clone(),
-                    registry: registry.clone(),
-                };
-                match tools.execute(tool_name, input.clone(), &tool_ctx).await {
-                    Ok(res) => {
-                        if !res.is_error {
-                            cache.set_tool_result(cache_key.clone(), res.content.clone(), input).await;
-                        }
-                        res
-                    }
-                    Err(e) => crate::tools::ToolResult {
-                        content: format!("Tool error: {}", e), is_error: true, metadata: None,
-                    },
-                }
-            };
+            let output = crate::core::tool_executor::ToolExecutor::execute_single_tool(
+                tools, cache, &exec_config, tool_name, input, state.turn(),
+            ).await;
+            let mut result = output.result;
+            let elapsed = output.duration_ms;
 
             // StepObserver: 评估工具结果并决定下一步
             let mut early_stop_reason: Option<String> = None;
             loop {
-                let action = state.observer_mut().observe(tool_name, &mut result);
+                let action = {
+                    let mut obs = state.observer.lock().await;
+                    obs.observe(tool_name, &mut result)
+                };
                 match action {
                     ObserveAction::Continue => break,
                     ObserveAction::Retry => {
                         info!("StepObserver retry: tool '{}'", tool_name);
-                        let tool_ctx = crate::tools::ToolContext {
-                            session_id: config.session_id.clone(),
-                            working_dir: std::env::current_dir()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_else(|_| ".".into()),
-                            turn_number: current_turn,
-                            agent_id: agent_id.clone(),
-                            registry: registry.clone(),
-                        };
-                        result = match tools.execute(tool_name, input.clone(), &tool_ctx).await {
-                            Ok(res) => {
-                                if !res.is_error {
-                                    cache.set_tool_result(cache_key.clone(), res.content.clone(), input).await;
-                                }
-                                res
-                            }
-                            Err(e) => crate::tools::ToolResult {
-                                content: format!("Tool error: {}", e), is_error: true, metadata: None,
-                            },
-                        };
+                        let retry_output = crate::core::tool_executor::ToolExecutor::execute_single_tool(
+                            tools, cache, &exec_config, tool_name, input, state.turn(),
+                        ).await;
+                        result = retry_output.result;
                     }
                     ObserveAction::Replan { hint } => {
                         info!("StepObserver replan: {}", hint);
@@ -1140,8 +1028,6 @@ pub async fn run_simple_loop<'a>(
                     }
                 }
             }
-
-            let elapsed = start_time.elapsed().as_millis() as u64;
 
             // 审计: 工具调用
             {
@@ -1180,17 +1066,9 @@ pub async fn run_simple_loop<'a>(
                 });
             }
 
-            state.add_message(Message {
-                role: Role::Tool,
-                content: vec![ContentBlock::ToolResult {
-                    tool_name: tool_name.clone(),
-                    content: result.content,
-                    is_error: result.is_error,
-                    tool_call_id: tool_call_id.clone(),
-                }],
-                reasoning_content: None,
-                cache_breakpoint: false,
-            });
+            state.add_message(build_tool_result_message(
+                tool_call_id, tool_name, &result.content, result.is_error,
+            ));
             state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::ToolResultChange);
             debug!("CacheBreak: ToolResultChange ({})", tool_name);
 
@@ -1214,13 +1092,66 @@ pub async fn run_simple_loop<'a>(
     }
 }
 
-/// 判断工具调用列表是否全部为只读工具 (可并行执行)
-fn are_tools_readonly(tools: &[(String, String, serde_json::Value)]) -> bool {
-    tools.iter().all(|(_, name, _)| matches!(name.as_str(),
-        "read" | "symbol_search" | "find_callers" | "project_map"
-        | "glob" | "grep" | "ask_user" | "list_peers"
-        | "snapshot_history" | "web_search"
-    ))
+/// 护栏检查 — 工具执行前检查
+///
+/// 返回 `Some(Message)` 表示被拦截（调用方应将该消息加入历史并跳过该工具）
+async fn check_guardrail_tool(
+    guardrails: Option<&crate::core::guardrail::GuardrailChain>,
+    turn_ctx: &crate::core::guardrail::TurnContext,
+    tool_name: &str,
+    input: &serde_json::Value,
+    tool_call_id: &str,
+) -> Option<Message> {
+    let gc = guardrails?;
+    match gc.check_tool(turn_ctx, tool_name, input).await {
+        crate::core::guardrail::GuardResult::Allow => None,
+        crate::core::guardrail::GuardResult::Deny(reason) => {
+            Some(Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_name: tool_name.to_string(),
+                    content: format!("Guardrail denied: {}", reason),
+                    is_error: true,
+                    tool_call_id: tool_call_id.to_string(),
+                }],
+                reasoning_content: None,
+                cache_breakpoint: false,
+            })
+        }
+        crate::core::guardrail::GuardResult::Skip => {
+            Some(Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_name: tool_name.to_string(),
+                    content: String::new(),
+                    is_error: true,
+                    tool_call_id: tool_call_id.to_string(),
+                }],
+                reasoning_content: None,
+                cache_breakpoint: false,
+            })
+        }
+    }
+}
+
+/// 构建工具结果消息
+fn build_tool_result_message(
+    tool_call_id: &str,
+    tool_name: &str,
+    content: &str,
+    is_error: bool,
+) -> Message {
+    Message {
+        role: Role::Tool,
+        content: vec![ContentBlock::ToolResult {
+            tool_name: tool_name.to_string(),
+            content: content.to_string(),
+            is_error,
+            tool_call_id: tool_call_id.to_string(),
+        }],
+        reasoning_content: None,
+        cache_breakpoint: false,
+    }
 }
 
 /// 判断是否为永久性错误 (重试无意义)
@@ -1311,27 +1242,6 @@ mod tests {
         assert!(!is_permanent_error("Connection timed out"));
         assert!(!is_permanent_error("Error: process exited with code 1"));
         assert!(!is_permanent_error("npm ERR! code ELIFECYCLE"));
-    }
-
-    // ── are_tools_readonly ─────────────────────────────────
-
-    #[test]
-    fn readonly_tools_detected() {
-        let tools: Vec<(String, String, serde_json::Value)> = vec![
-            ("id1".into(), "read".into(), serde_json::json!({})),
-            ("id2".into(), "grep".into(), serde_json::json!({})),
-            ("id3".into(), "glob".into(), serde_json::json!({})),
-        ];
-        assert!(are_tools_readonly(&tools));
-    }
-
-    #[test]
-    fn write_tools_not_readonly() {
-        let tools: Vec<(String, String, serde_json::Value)> = vec![
-            ("id1".into(), "read".into(), serde_json::json!({})),
-            ("id2".into(), "write".into(), serde_json::json!({})),
-        ];
-        assert!(!are_tools_readonly(&tools));
     }
 
     // ── tool_title ─────────────────────────────────────────
