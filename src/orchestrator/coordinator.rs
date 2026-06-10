@@ -155,8 +155,8 @@ impl Coordinator {
 
     /// 创建 Worker，继承主 Agent 的全部工具（包括 MCP 和自定义工具）
     async fn create_worker(&self, id: &str) -> Worker {
-        // 从统一配置获取模型信息
-        let app_config = crate::config::OrionConfig::load();
+        // 从统一配置获取模型信息 (使用缓存避免重复加载)
+        let app_config = crate::config::OrionConfig::load_cached();
         let model_config = app_config.active_model();
 
         let config = WorkerConfig {

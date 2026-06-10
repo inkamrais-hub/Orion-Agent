@@ -48,8 +48,8 @@ impl Tool for SubAgentTool {
         // Create provider based on model policy
         let (model, provider) = match &self.model_policy {
             SubAgentModelPolicy::Inherit => {
-                // 从统一配置获取模型信息
-                let app_config = crate::config::OrionConfig::load();
+                // 从统一配置获取模型信息 (使用缓存避免重复加载)
+                let app_config = crate::config::OrionConfig::load_cached();
                 let model_config = app_config.active_model();
 
                 let api_key = model_config.api_key.clone()

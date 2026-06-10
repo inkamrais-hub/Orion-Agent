@@ -254,6 +254,14 @@ impl Tool for WriteTool {
             });
         }
 
+        // Create parent directories if they don't exist
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.exists() {
+                tokio::fs::create_dir_all(parent).await
+                    .map_err(|e| crate::Error::Tool(format!("Cannot create directory '{}': {}", parent.display(), e)))?;
+            }
+        }
+
         tokio::fs::write(path, content).await?;
         // 更新文件缓存 (写入新内容，而非仅失效)
         crate::core::cache::file_cache_set(path, content.to_string());
@@ -343,7 +351,7 @@ impl Tool for BashTool {
         // High 及以下继续执行
 
         // ── Docker 沙箱模式 ──────────────────────────────────
-        let config = crate::config::OrionConfig::load();
+        let config = crate::config::OrionConfig::load_cached();
         if config.docker.enabled {
             use docker_executor::{DockerExecutor, DockerExecutorConfig};
 
@@ -352,12 +360,12 @@ impl Tool for BashTool {
                 tracing::warn!("Docker enabled but not available, falling back to local execution");
             } else {
                 let executor = DockerExecutor::new(DockerExecutorConfig {
-                    image: config.docker.image,
-                    workdir: config.docker.workdir,
+                    image: config.docker.image.clone(),
+                    workdir: config.docker.workdir.clone(),
                     auto_pull: config.docker.auto_pull,
-                    network: config.docker.network,
-                    memory_limit: config.docker.memory_limit,
-                    cpu_limit: config.docker.cpu_limit,
+                    network: config.docker.network.clone(),
+                    memory_limit: config.docker.memory_limit.clone(),
+                    cpu_limit: config.docker.cpu_limit.clone(),
                 });
 
                 return match executor.execute(cmd, timeout_secs).await {

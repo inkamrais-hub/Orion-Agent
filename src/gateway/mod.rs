@@ -186,7 +186,7 @@ pub async fn run_task_once(
     let loop_config = crate::core::r#loop::SimpleLoopConfig {
         model: model_config.name.clone(),
         system_prompt,
-        max_turns: 20,
+        max_turns: 50,
         max_tool_calls: 100,
         token_budget,
         agent_id: "main".into(),

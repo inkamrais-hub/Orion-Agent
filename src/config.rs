@@ -5,7 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use crate::model::ModelConfig;
+
+/// Global config cache — loaded once, reused everywhere
+static CONFIG_CACHE: OnceLock<OrionConfig> = OnceLock::new();
 
 // ============================================================
 //  顶层配置 (唯一配置源)
@@ -66,12 +70,18 @@ impl OrionConfig {
                         return config;
                     }
                     Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "配置解析失败，使用默认配置");
+                        tracing::error!(path = %path.display(), error = %e, "配置解析失败，使用默认配置");
                     }
                 }
             }
         }
         Self::default()
+    }
+
+    /// 缓存加载 — 首次调用加载并缓存，后续调用直接返回缓存值。
+    /// 工具实现和循环内部应使用此方法，避免每次工具调用都重新读取磁盘。
+    pub fn load_cached() -> &'static OrionConfig {
+        CONFIG_CACHE.get_or_init(|| Self::load())
     }
 
     /// 从指定路径加载
