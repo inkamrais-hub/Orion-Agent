@@ -14,8 +14,7 @@ use crate::tools::registry::ToolRegistry;
 /// MapReduce 编排器
 pub struct MapReduceOrchestrator {
     provider: Arc<dyn Provider>,
-    /// 每个子 Agent 需要独立的 ToolRegistry（ToolRegistry 不实现 Clone），
-    /// 因此用工厂闭包为每个子任务创建新的 registry 实例。
+    /// 工具工厂闭包：为每个子 Agent 创建独立的 ToolRegistry 实例
     tools_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
     max_parallel: usize,
     model: String,
@@ -69,6 +68,11 @@ impl MapReduceOrchestrator {
             max_parallel: 6,
             model: "deepseek-chat".into(),
         }
+    }
+
+    /// 创建编排器，子 Agent 共享同一份工具注册表（通过 Clone）
+    pub fn with_registry(provider: Arc<dyn Provider>, registry: ToolRegistry) -> Self {
+        Self::new(provider, move || registry.clone())
     }
 
     /// 创建编排器，子 Agent 使用空工具（纯文本生成任务）

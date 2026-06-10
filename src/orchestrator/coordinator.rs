@@ -4,8 +4,6 @@ use super::worker::{Worker, WorkerConfig};
 use crate::core::provider::{Provider, ProviderRequest, Message, Role, ContentBlock};
 use crate::orchestrator::plan::{TaskPlan, TaskStatus, PLANNING_SYSTEM_PROMPT};
 use crate::tools::registry::ToolRegistry;
-use crate::tools::{ReadTool, WriteTool, BashTool};
-use crate::tools::edit::EditTool;
 use crate::core::cache::GlobalCache;
 use crate::agent::registry::AgentRegistry;
 use std::sync::Arc;
@@ -32,6 +30,8 @@ pub struct Coordinator {
     pub provider: Arc<dyn Provider>,
     pub cache: GlobalCache,
     pub registry: Arc<AgentRegistry>,
+    /// 共享工具注册表（clone 给每个 Worker）
+    pub tools: ToolRegistry,
 }
 
 impl Coordinator {
@@ -40,8 +40,9 @@ impl Coordinator {
         provider: Arc<dyn Provider>,
         cache: GlobalCache,
         registry: Arc<AgentRegistry>,
+        tools: ToolRegistry,
     ) -> Self {
-        Self { config, provider, cache, registry }
+        Self { config, provider, cache, registry, tools }
     }
 
     /// 执行任务：先用 LLM 生成 TaskPlan，再按 DAG 依赖逐个执行子任务
@@ -135,10 +136,7 @@ impl Coordinator {
         Ok(text)
     }
 
-    // TODO(4.2): 子 Worker 无法继承主 Agent 的 MCP 工具和自定义工具。
-    //  当前硬编码注册 6 个内置工具，忽略了主 Agent 通过 MCP 或自定义注册的工具。
-    //  根本原因: ToolRegistry 内部用 HashMap<String, Box<dyn Tool>>，Box<dyn Tool> 无 Clone，
-    //  无法直接克隆 registry。需要将 ToolRegistry 改为 Arc<dyn Tool> 存储才能支持共享。
+    /// 创建 Worker，继承主 Agent 的全部工具（包括 MCP 和自定义工具）
     async fn create_worker(&self, id: &str) -> Worker {
         // 从统一配置获取模型信息
         let app_config = crate::config::OrionConfig::load();
@@ -163,13 +161,9 @@ impl Coordinator {
                 &config.model,
             ),
         );
-        let mut tools = ToolRegistry::new();
-        tools.register(ReadTool);
-        tools.register(WriteTool);
-        tools.register(BashTool);
-        tools.register(EditTool);
-        tools.register(crate::tools::glob_tool::GlobTool);
-        tools.register(crate::tools::grep_tool::GrepTool);
+
+        // Clone 共享工具注册表，子 Worker 自动继承全部工具
+        let tools = self.tools.clone();
 
         Worker::new(config, provider, tools, self.cache.clone(), Some(self.registry.clone()))
     }

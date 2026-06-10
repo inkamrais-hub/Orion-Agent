@@ -66,7 +66,9 @@ async fn main() -> orion_agent::Result<()> {
     };
     let report_cache = cache.clone();
     let registry = AgentRegistry::new();
-    let coordinator = Coordinator::new(coord_config, provider, cache, registry);
+    let mut tools = orion_agent::tools::registry::ToolRegistry::new();
+    orion_agent::tools::register_default_tools(&mut tools);
+    let coordinator = Coordinator::new(coord_config, provider, cache, registry, tools);
 
     // 8. 用户输入
     let user_request = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
