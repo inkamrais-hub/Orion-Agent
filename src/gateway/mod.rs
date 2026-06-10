@@ -160,23 +160,19 @@ pub async fn run_task_once(
 
     // 创建 Session
     let session_id = crate::session::store::generate_session_id();
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".into());
-    let db_path = std::path::PathBuf::from(&home).join(".orion").join("orion.db");
-    let session_store = std::sync::Arc::new(crate::session::store::SessionStore::new(&db_path)?);
-    let _ = session_store.create_session(&crate::session::store::SessionMeta {
+    let store = crate::session::UnifiedStore::open().await?;
+    let _ = store.create_session(&crate::session::unified::SessionMeta {
         session_id: session_id.clone(),
         agent_name: "main".into(),
         model: model_config.name.clone(),
         working_dir: std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into()),
-        status: crate::session::store::SessionStatus::Active,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        status: crate::session::unified::SessionStatus::Active,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
         turn_count: 0,
         tool_call_count: 0,
         total_tokens: 0,
-    });
+    }).await;
 
     let hook_engine = std::sync::Arc::new(tokio::sync::Mutex::new(
         crate::core::hooks::HookEngine::load_default(),

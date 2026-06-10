@@ -9,14 +9,15 @@ use crate::config::OrionConfig;
 use crate::core::cache::GlobalCache;
 use crate::core::provider::Provider;
 use crate::core::providers::openai_compat::OpenAICompatProvider;
-use crate::session::manager::SessionManager;
 use crate::session::memory::{extract_memories, SessionMemory};
+use crate::session::UnifiedStore;
 use crate::tools::a2a_message::{ListPeersTool, SendMessageTool};
 use crate::tools::agent_tool::SubAgentTool;
 use crate::tools::registry::ToolRegistry;
+use std::sync::Arc;
 
 pub struct ChatState {
-    pub session_mgr: SessionManager,
+    pub store: Arc<UnifiedStore>,
     pub current_session: String,
     pub provider: Box<dyn Provider>,
     pub model: String,
@@ -44,25 +45,49 @@ fn register_all_tools(config: &OrionConfig) -> (ToolRegistry, GlobalCache) {
     (tools, cache)
 }
 
+/// 创建新 session 的辅助函数
+async fn create_session_helper(store: &Arc<UnifiedStore>, model: &str) -> crate::Result<String> {
+    let session_id = crate::session::store::generate_session_id();
+    let now = chrono::Utc::now().to_rfc3339();
+    store
+        .create_session(&crate::session::unified::SessionMeta {
+            session_id: session_id.clone(),
+            agent_name: String::new(),
+            model: model.to_string(),
+            working_dir: std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            status: crate::session::unified::SessionStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            turn_count: 0,
+            tool_call_count: 0,
+            total_tokens: 0,
+        })
+        .await?;
+    tracing::info!(session_id = %session_id, model = %model, "Session created");
+    Ok(session_id)
+}
+
 /// 启动对话
 pub async fn run(config: OrionConfig) -> crate::Result<()> {
     let model_config = config.active_model();
-    let session_mgr = SessionManager::open().await?;
+    let store = UnifiedStore::open().await?;
 
     // 恢复或创建 session
-    let sessions = session_mgr.list().await?;
+    let sessions = store.list_sessions(50).await?;
     let session_id = if config.cli.auto_resume {
-        if let Some(latest) = sessions.iter().max_by_key(|s| s.updated_at) {
+        if let Some(latest) = sessions.iter().max_by_key(|s| s.updated_at.clone()) {
             tracing::info!(session = %latest.session_id, "Resuming session");
             eprintln!("⚡ Resuming session {}", &latest.session_id[..8]);
             latest.session_id.clone()
         } else {
-            let id = session_mgr.create(&model_config.name).await?;
+            let id = create_session_helper(&store, &model_config.name).await?;
             eprintln!("⚡ New session {}", &id[..8]);
             id
         }
     } else {
-        let id = session_mgr.create(&model_config.name).await?;
+        let id = create_session_helper(&store, &model_config.name).await?;
         eprintln!("⚡ New session {}", &id[..8]);
         id
     };
@@ -87,7 +112,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
     let memory = SessionMemory::load();
 
     let mut state = ChatState {
-        session_mgr,
+        store,
         current_session: session_id,
         provider,
         model: model_config.name.clone(),
@@ -162,7 +187,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
         };
         match execute_turn(
             &*state.provider, &state.tools, &state.cache,
-            &state.session_mgr, &state.current_session, input, &state.model,
+            &state.store, &state.current_session, input, &state.model,
             &system_prompt, None, images,
             state.thinking, &state.reasoning_effort,
         ).await {
@@ -287,7 +312,7 @@ async fn handle_command(
             eprintln!("已清空 {} 张待发送图片", count);
         }
         "/new" => {
-            match state.session_mgr.create(&state.model).await {
+            match create_session_helper(&state.store, &state.model).await {
                 Ok(id) => {
                     state.current_session = id.clone();
                     eprintln!("⚡ New session: {}", &id[..8]);
@@ -296,14 +321,14 @@ async fn handle_command(
             }
         }
         "/list" => {
-            match state.session_mgr.list().await {
+            match state.store.list_sessions(50).await {
                 Ok(sessions) => {
                     if sessions.is_empty() {
                         eprintln!("No sessions.");
                     } else {
                         for (i, s) in sessions.iter().enumerate() {
                             let marker = if s.session_id == state.current_session { " ← current" } else { "" };
-                            eprintln!("  [{}] {} ({} turns, {:?}){}", i, &s.session_id[..8], s.turn_count, s.status, marker);
+                            eprintln!("  [{}] {} ({} turns, {}){}", i, &s.session_id[..8], s.turn_count, s.status.as_str(), marker);
                         }
                     }
                 }
@@ -313,7 +338,7 @@ async fn handle_command(
         "/resume" => {
             match arg {
                 Some(id_prefix) => {
-                    let sessions = state.session_mgr.list().await.unwrap_or_default();
+                    let sessions = state.store.list_sessions(50).await.unwrap_or_default();
                     if let Some(s) = sessions.iter().find(|s| s.session_id.starts_with(id_prefix)) {
                         state.current_session = s.session_id.clone();
                         eprintln!("⚡ Resumed: {}", &s.session_id[..8]);
@@ -327,13 +352,13 @@ async fn handle_command(
         "/drop" => {
             match arg {
                 Some(id_prefix) => {
-                    let sessions = state.session_mgr.list().await.unwrap_or_default();
+                    let sessions = state.store.list_sessions(50).await.unwrap_or_default();
                     if let Some(s) = sessions.iter().find(|s| s.session_id.starts_with(id_prefix)) {
                         let sid = s.session_id.clone();
-                        state.session_mgr.delete(&sid).await.ok();
+                        state.store.delete_session(&sid).await.ok();
                         eprintln!("🗑 Dropped: {}", &sid[..8]);
                         if sid == state.current_session {
-                            match state.session_mgr.create(&state.model).await {
+                            match create_session_helper(&state.store, &state.model).await {
                                 Ok(new_id) => {
                                     state.current_session = new_id.clone();
                                     eprintln!("⚡ Auto-created new session: {}", &new_id[..8]);
@@ -438,7 +463,7 @@ async fn handle_command(
         "/exit" | "/quit" => return CmdResult::Exit,
         _ => {
             // 通用斜杠命令注册表 (chat/commands.rs 处理 /clear, /status, /history, /memory, /sessions, /delete, /restore, /trash)
-            match slash_registry.handle(input) {
+            match slash_registry.handle(input).await {
                 Some(response) => {
                     if !response.is_empty() {
                         eprintln!("{}", response);

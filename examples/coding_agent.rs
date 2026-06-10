@@ -11,7 +11,8 @@ use orion_agent::core::cache::GlobalCache;
 use orion_agent::core::providers::openai_compat::OpenAICompatProvider;
 use orion_agent::orchestrator::coordinator::{Coordinator, CoordinatorConfig};
 use orion_agent::agent::registry::AgentRegistry;
-use orion_agent::session::manager::SessionManager;
+use orion_agent::session::UnifiedStore;
+use orion_agent::session::unified::{SessionMeta, SessionStatus};
 use orion_agent::ui::progress::ProgressBar;
 use orion_agent::ui::report::{SessionReport, print_session_report};
 use std::sync::Arc;
@@ -48,8 +49,23 @@ async fn main() -> orion_agent::Result<()> {
     }
 
     // 4. 创建 Session
-    let session_mgr = SessionManager::open().await?;
-    let session_id = session_mgr.create(&config.default_model).await?;
+    let store = UnifiedStore::open().await?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    store.create_session(&SessionMeta {
+        session_id: session_id.clone(),
+        agent_name: "coding-agent".into(),
+        model: config.default_model.clone(),
+        working_dir: std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".into()),
+        status: SessionStatus::Active,
+        created_at: now.clone(),
+        updated_at: now,
+        turn_count: 0,
+        tool_call_count: 0,
+        total_tokens: 0,
+    }).await?;
     tracing::info!(session = %session_id, "Session started");
 
     // 5. 全局缓存
@@ -92,9 +108,7 @@ async fn main() -> orion_agent::Result<()> {
     drop(progress);
 
     // 10. 更新 Session
-    session_mgr.update(&session_id, |e| {
-        e.status = orion_agent::session::SessionStatus::Completed;
-    }).await.ok();
+    store.update_session_status(&session_id, SessionStatus::Completed).await.ok();
 
     // 11. Session 报告
     if !json_mode {

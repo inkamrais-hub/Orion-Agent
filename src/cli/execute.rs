@@ -1,9 +1,10 @@
 use crate::core::cache::GlobalCache;
 use crate::core::r#loop::{run_simple_loop, LoopOutcome, LoopEvent, EventCallback, tool_title, classify_bash_risk, BashRisk, truncate_str};
-use crate::session::manager::SessionManager;
-use crate::session::TranscriptEntry;
+use crate::session::UnifiedStore;
+use crate::session::unified::TranscriptEntry as UnifiedTranscriptEntry;
 use crate::tools::registry::ToolRegistry;
 use chrono::Utc;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// 构建 System Prompt (静态部分，用于 Prompt Caching)
@@ -140,7 +141,7 @@ pub async fn execute_turn(
     provider: &dyn crate::core::provider::Provider,
     tools: &ToolRegistry,
     cache: &GlobalCache,
-    session_mgr: &SessionManager,
+    store: &Arc<UnifiedStore>,
     session_id: &str,
     user_input: &str,
     model: &str,
@@ -150,15 +151,23 @@ pub async fn execute_turn(
     thinking: bool,
     reasoning_effort: &str,
 ) -> crate::Result<String> {
-    let history = session_mgr.restore(session_id).await.unwrap_or_default();
-    session_mgr.append_transcript(session_id, &TranscriptEntry {
-        id: Uuid::new_v4().to_string(),
-        parent_id: history.last().map(|e| e.id.clone()),
-        role: "user".to_string(),
-        content: user_input.to_string(),
-        tool_calls: None,
-        timestamp: Utc::now(),
-    }).await.ok();
+    let history = store.get_transcripts(session_id).await.unwrap_or_default();
+
+    // Append user message to transcript
+    let user_msg_id = Uuid::new_v4().to_string();
+    let now_str = Utc::now().to_rfc3339();
+    store
+        .append_transcript(&UnifiedTranscriptEntry {
+            id: user_msg_id.clone(),
+            session_id: session_id.to_string(),
+            parent_id: history.last().map(|e| e.id.clone()),
+            role: "user".to_string(),
+            content: user_input.to_string(),
+            tool_calls: None,
+            timestamp: now_str,
+        })
+        .await
+        .ok();
 
     let event_cb = event_callback.unwrap_or_else(create_cli_event_callback);
 
@@ -206,15 +215,29 @@ pub async fn execute_turn(
         LoopOutcome::GuardrailDenied { reason } => format!("[Guardrail] {}", reason),
     };
 
-    session_mgr.append_transcript(session_id, &TranscriptEntry {
-        id: Uuid::new_v4().to_string(),
-        parent_id: history.last().map(|e| e.id.clone()),
-        role: "assistant".to_string(),
-        content: response.clone(),
-        tool_calls: None,
-        timestamp: Utc::now(),
-    }).await.ok();
-    session_mgr.update(session_id, |e| { e.turn_count += 1; }).await.ok();
+    // Append assistant response to transcript (parent is the user message just appended)
+    let now_str2 = Utc::now().to_rfc3339();
+    store
+        .append_transcript(&UnifiedTranscriptEntry {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            parent_id: Some(user_msg_id),
+            role: "assistant".to_string(),
+            content: response.clone(),
+            tool_calls: None,
+            timestamp: now_str2,
+        })
+        .await
+        .ok();
+
+    // Update session turn count
+    if let Ok(Some(session)) = store.get_session(session_id).await {
+        store
+            .update_session_stats(session_id, session.turn_count + 1, session.tool_call_count, session.total_tokens)
+            .await
+            .ok();
+    }
+
     Ok(response)
 }
 

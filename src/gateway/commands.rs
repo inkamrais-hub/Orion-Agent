@@ -74,10 +74,9 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         handler: Box::new(|args, ctx| {
             Box::pin(async move {
                 let port = args.first().and_then(|s| s.parse::<u16>().ok()).unwrap_or(8080);
-                let db_path = crate::config::data_dir_path().join("agents.db");
-                let agent_store = std::sync::Arc::new(crate::agent::store::AgentStore::new(&db_path)?);
+                let store = crate::session::UnifiedStore::open().await?;
                 let api_state = std::sync::Arc::new(crate::api::ApiState {
-                    agent_store,
+                    store,
                     config: ctx.config,
                 });
                 let app = crate::api::create_router(api_state);

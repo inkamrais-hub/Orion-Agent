@@ -19,6 +19,8 @@ pub struct ToolRegistry {
     activated: Arc<std::sync::Mutex<HashSet<String>>>,
     /// 是否启用延迟装载模式
     lazy_mode: bool,
+    /// 统一存储（用于文件快照持久化）
+    store: Option<Arc<crate::session::UnifiedStore>>,
 }
 
 impl Clone for ToolRegistry {
@@ -29,6 +31,7 @@ impl Clone for ToolRegistry {
                 self.activated.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             )),
             lazy_mode: self.lazy_mode,
+            store: self.store.clone(),
         }
     }
 }
@@ -39,12 +42,18 @@ impl ToolRegistry {
             tools: HashMap::new(),
             activated: Arc::new(std::sync::Mutex::new(HashSet::new())),
             lazy_mode: false,
+            store: None,
         }
     }
 
     /// 启用延迟装载模式
     pub fn enable_lazy_mode(&mut self) {
         self.lazy_mode = true;
+    }
+
+    /// 注入统一存储（用于文件快照持久化）
+    pub fn set_store(&mut self, store: Arc<crate::session::UnifiedStore>) {
+        self.store = Some(store);
     }
 
     /// 是否处于延迟装载模式
@@ -185,7 +194,7 @@ impl ToolRegistry {
         // ── 后置拦截器：保存快照到 SQLite ──
         if (name == "write" || name == "edit") && !result.is_error {
             if let Some(ref path_str) = snapshot_path {
-                save_file_snapshot(ctx, name, path_str, content_before);
+                save_file_snapshot(ctx, name, path_str, content_before, self.store.as_deref()).await;
             }
         }
 
@@ -254,39 +263,32 @@ fn normalize_and_validate_path(path_str: &str, working_dir: &str) -> crate::Resu
 // ============================================================
 
 /// 将文件快照保存到 SQLite（异步 fire-and-forget）
-fn save_file_snapshot(
+async fn save_file_snapshot(
     ctx: &ToolContext,
     tool_name: &str,
     target_path: &str,
     content_before: Option<String>,
+    store: Option<&crate::session::UnifiedStore>,
 ) {
     // 跳过空 session（非 API 调用场景可能没有 session_id）
     if ctx.session_id.is_empty() {
         return;
     }
 
-    let snapshot = crate::agent::store::SessionSnapshot {
-        snapshot_id: uuid::Uuid::new_v4().to_string(),
-        session_id: ctx.session_id.clone(),
-        agent_id: ctx.agent_id.clone(),
-        turn_index: ctx.turn_number as i64,
-        tool_name: tool_name.to_string(),
-        target_path: target_path.to_string(),
-        content_before,
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
+    if let Some(store) = store {
+        let snapshot = crate::agent::store::SessionSnapshot {
+            snapshot_id: uuid::Uuid::new_v4().to_string(),
+            session_id: ctx.session_id.clone(),
+            agent_id: ctx.agent_id.clone(),
+            turn_index: ctx.turn_number as i64,
+            tool_name: tool_name.to_string(),
+            target_path: target_path.to_string(),
+            content_before,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
 
-    let db_path = crate::config::data_dir_path().join("agents.db");
-
-    // 同步写入失败只 warn 不阻断主流程
-    match crate::agent::store::AgentStore::new(&db_path) {
-        Ok(store) => {
-            if let Err(e) = store.save_snapshot(&snapshot) {
-                tracing::warn!(error = %e, "Failed to save file snapshot");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to open agent store for snapshot");
+        if let Err(e) = store.save_snapshot(&snapshot).await {
+            tracing::warn!(error = %e, "Failed to save file snapshot");
         }
     }
 }
