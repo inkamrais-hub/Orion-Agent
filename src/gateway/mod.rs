@@ -166,6 +166,10 @@ pub async fn run_task_once(
     images: Option<Vec<crate::core::provider::ContentBlock>>,
     sandbox: bool,
 ) -> crate::Result<String> {
+    // 初始化工作区守卫 (必须在工具执行前完成)
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    crate::core::workspace::init_workspace_guard(workspace_root).await;
+
     let agent = build_main_agent(config, sandbox).await?;
 
     // 创建 Session

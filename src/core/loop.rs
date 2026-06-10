@@ -452,6 +452,8 @@ pub struct LoopState {
     pub observer: Arc<tokio::sync::Mutex<StepObserver>>,
     /// 缓存断点跟踪器
     pub cache_tracker: crate::core::cache::CacheBreakTracker,
+    /// 连续 budget critical 轮次 (用于强制终止)
+    budget_critical_streak: u32,
 }
 
 impl LoopState {
@@ -466,6 +468,7 @@ impl LoopState {
             current_goal_id: None,
             observer: Arc::new(tokio::sync::Mutex::new(StepObserver::new())),
             cache_tracker: crate::core::cache::CacheBreakTracker::new(),
+            budget_critical_streak: 0,
         }
     }
 
@@ -565,6 +568,12 @@ impl<'a> ContextManager<'a> {
         if messages.len() > self.threshold {
             self.compact_with_fallback(messages).await;
         }
+    }
+
+    /// 强制压缩上下文 (不受消息数阈值限制)
+    /// 用于 budget critical 时的紧急压缩
+    pub async fn force_compact(&mut self, messages: &mut Vec<Message>) {
+        self.compact_with_fallback(messages).await;
     }
 
     async fn compact_with_fallback(&mut self, messages: &mut Vec<Message>) {
@@ -745,9 +754,49 @@ pub async fn run_simple_loop(
             }, "loop");
         }
 
-        if state.token_budget_tracker.status() == crate::core::provider::BudgetStatus::Critical {
-            // 不再硬终止，而是触发上下文压缩继续工作
-            info!("Token budget critical: {} in / {} out", state.total_usage.input_tokens, state.total_usage.output_tokens);
+        match state.token_budget_tracker.status() {
+            crate::core::provider::BudgetStatus::Critical => {
+                state.budget_critical_streak += 1;
+                let streak = state.budget_critical_streak;
+                let usage_ratio = state.token_budget_tracker.input_usage();
+                info!(
+                    "Token budget critical (streak={}): {:.1}% used ({} in / {} out)",
+                    streak, usage_ratio * 100.0,
+                    state.total_usage.input_tokens, state.total_usage.output_tokens
+                );
+                if streak >= 3 {
+                    // 连续 3 轮 budget critical 且压缩未能缓解 — 强制终止
+                    tracing::warn!(
+                        "Budget enforcement: terminating after {} consecutive critical turns. \
+                         Usage: {} in / {} out",
+                        streak, state.total_usage.input_tokens, state.total_usage.output_tokens
+                    );
+                    // 先把当前 assistant message 加入历史 (避免丢失)
+                    let mut final_content: Vec<ContentBlock> = Vec::new();
+                    if !acc_text.is_empty() {
+                        final_content.push(ContentBlock::Text { text: acc_text.clone() });
+                    }
+                    if !final_content.is_empty() {
+                        state.add_message(Message::new(Role::Assistant, final_content));
+                    }
+                    return LoopOutcome::BudgetExceeded { usage: state.usage_clone() };
+                }
+                // 首次 critical: 立即触发上下文压缩 (不受消息数阈值限制)
+                if streak == 1 {
+                    tracing::info!("Budget critical: forcing immediate context compaction");
+                    let mut ctx_mgr = ContextManager::new(
+                        Some(provider), model, &mut state.cache_tracker,
+                    );
+                    ctx_mgr.force_compact(&mut state.messages).await;
+                }
+            }
+            _ => {
+                // Budget 恢复正常，重置连续计数
+                if state.budget_critical_streak > 0 {
+                    info!("Token budget recovered from critical");
+                    state.budget_critical_streak = 0;
+                }
+            }
         }
 
         // 从流式收集的结果构建 assistant message
@@ -1066,5 +1115,71 @@ mod tests {
         let title = tool_title("bash", &input);
         assert!(title.starts_with("Bash: "));
         assert!(title.len() < 80);
+    }
+
+    // ── Budget enforcement ─────────────────────────────────
+
+    use crate::core::provider::BudgetStatus;
+
+    fn make_usage(input: u64, output: u64) -> UsageInfo {
+        UsageInfo { input_tokens: input, output_tokens: output, cache_creation_tokens: 0, cache_read_tokens: 0 }
+    }
+
+    #[test]
+    fn budget_critical_streak_initializes_to_zero() {
+        let state = LoopState::new(128_000);
+        assert_eq!(state.budget_critical_streak, 0);
+    }
+
+    #[test]
+    fn budget_status_ok_under_threshold() {
+        let mut state = LoopState::new(100_000);
+        state.record_usage(&make_usage(50_000, 1_000));
+        assert_eq!(state.token_budget_tracker.status(), BudgetStatus::Ok);
+        assert_eq!(state.budget_critical_streak, 0);
+    }
+
+    #[test]
+    fn budget_status_warning_at_80_percent() {
+        let mut state = LoopState::new(100_000);
+        state.record_usage(&make_usage(85_000, 1_000));
+        assert_eq!(state.token_budget_tracker.status(), BudgetStatus::Warning);
+    }
+
+    #[test]
+    fn budget_status_critical_at_95_percent() {
+        let mut state = LoopState::new(100_000);
+        state.record_usage(&make_usage(96_000, 1_000));
+        assert_eq!(state.token_budget_tracker.status(), BudgetStatus::Critical);
+    }
+
+    #[test]
+    fn budget_streak_increments_on_critical() {
+        let mut state = LoopState::new(100_000);
+        state.record_usage(&make_usage(96_000, 1_000));
+        assert_eq!(state.token_budget_tracker.status(), BudgetStatus::Critical);
+        state.budget_critical_streak += 1;
+        assert_eq!(state.budget_critical_streak, 1);
+        state.budget_critical_streak += 1;
+        assert_eq!(state.budget_critical_streak, 2);
+        state.budget_critical_streak += 1;
+        assert_eq!(state.budget_critical_streak, 3);
+    }
+
+    #[test]
+    fn budget_streak_resets_on_recovery() {
+        let mut state = LoopState::new(100_000);
+        state.budget_critical_streak = 2;
+        state.budget_critical_streak = 0; // 模拟重置
+        assert_eq!(state.budget_critical_streak, 0);
+    }
+
+    #[test]
+    fn budget_should_terminate_at_streak_3() {
+        let mut state = LoopState::new(100_000);
+        state.record_usage(&make_usage(96_000, 1_000));
+        assert_eq!(state.token_budget_tracker.status(), BudgetStatus::Critical);
+        state.budget_critical_streak = 3;
+        assert!(state.budget_critical_streak >= 3);
     }
 }
