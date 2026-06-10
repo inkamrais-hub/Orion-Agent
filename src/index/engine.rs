@@ -118,7 +118,7 @@ impl CodeIndex {
         for &i in &exact {
             if remaining == 0 { break; }
             let s = &self.data.symbols[i];
-            if kind.map_or(true, |k| s.kind == k) {
+            if kind.is_none_or(|k| s.kind == k) {
                 results.push(SymbolResult { name: s.name.clone(), kind: s.kind.clone(), file: s.file.clone(), line: s.line, signature: s.signature.clone() });
                 remaining -= 1;
             }
@@ -126,14 +126,14 @@ impl CodeIndex {
         for &i in &prefix {
             if remaining == 0 { break; }
             let s = &self.data.symbols[i];
-            if kind.map_or(true, |k| s.kind == k) {
+            if kind.is_none_or(|k| s.kind == k) {
                 results.push(SymbolResult { name: s.name.clone(), kind: s.kind.clone(), file: s.file.clone(), line: s.line, signature: s.signature.clone() });
                 remaining -= 1;
             }
         }
         if remaining > 0 {
             let candidates: Vec<usize> = self.data.symbols.iter().enumerate()
-                .filter(|(i, s)| !seen.contains(i) && s.name.to_lowercase().contains(&ql) && kind.map_or(true, |k| s.kind == k))
+                .filter(|(i, s)| !seen.contains(i) && s.name.to_lowercase().contains(&ql) && kind.is_none_or(|k| s.kind == k))
                 .take(remaining)
                 .map(|(i, _)| i)
                 .collect();
@@ -150,7 +150,7 @@ impl CodeIndex {
         let indices = self.caller_index.get(&sl).map(|v| v.as_slice()).unwrap_or(&[]);
         Ok(indices.iter()
             .map(|&i| &self.data.callers[i])
-            .filter(|c| file.map_or(true, |f| c.file.contains(f)))
+            .filter(|c| file.is_none_or(|f| c.file.contains(f)))
             .map(|c| CallerResult { file: c.file.clone(), line: c.line, code: c.code.clone(), caller_func: c.caller_func.clone() })
             .collect())
     }
@@ -186,10 +186,10 @@ fn discover_source_files(root: &Path) -> Vec<PathBuf> {
     let walker = ignore::WalkBuilder::new(root).hidden(false).git_ignore(true).git_global(true).git_exclude(true).build();
     let mut files: Vec<PathBuf> = walker
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map_or(false, |ft| ft.is_file()))
+        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
         .filter(|e| {
             let p = e.path();
-            p.strip_prefix(root).map_or(false, |rel| {
+            p.strip_prefix(root).is_ok_and(|rel| {
                 let rel_s = rel.to_string_lossy();
                 !rel_s.starts_with(".orion") && is_source_file(p)
             })
@@ -314,8 +314,7 @@ fn extract_c_func(line: &str) -> Option<String> {
     let c_types = ["void ","int ","char ","bool ","float ","double ","long ","short ","unsigned ","signed ","size_t ","ssize_t ","int8_t ","int16_t ","int32_t ","int64_t ","uint8_t ","uint16_t ","uint32_t ","uint64_t "];
     let kw_skip = ["if ","for ","while ","switch ","return ","else ","sizeof ","case ","do "];
     for ct in &c_types {
-        if t.starts_with(ct) {
-            let rest = &t[ct.len()..];
+        if let Some(rest) = t.strip_prefix(ct) {
             let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
             let name = rest[..end].to_string();
             if name.is_empty() || !name.chars().next().unwrap().is_alphabetic() { continue; }
@@ -331,7 +330,7 @@ fn extract_c_func(line: &str) -> Option<String> {
 }
 
 /// Java: after access modifier, recursively skip `static`/`final`/`void`/`int`/etc., extract identifier
-fn extract_java_after_modifier<'a>(line: &'a str, modifier: &str) -> Option<String> {
+fn extract_java_after_modifier(line: &str, modifier: &str) -> Option<String> {
     let t = line.trim();
     if !t.starts_with(modifier) { return None; }
     let rest = &t[modifier.len()..];

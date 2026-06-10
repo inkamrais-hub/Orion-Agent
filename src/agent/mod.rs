@@ -2,7 +2,6 @@ pub mod runtime;
 pub mod lanes;
 pub mod protocol;
 pub mod registry;
-pub mod store;
 
 use uuid::Uuid;
 

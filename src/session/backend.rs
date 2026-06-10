@@ -4,8 +4,9 @@
 //! 使应用层不依赖特定存储后端。
 //! 未来可替换为 PostgreSQL、远程 API 等。
 
-use crate::agent::store::{AgentConfigModel, RollbackAction, SessionSnapshot};
-use crate::session::unified::{SessionMeta, SessionStatus, TranscriptEntry};
+use crate::session::unified::{
+    AgentConfigModel, RollbackAction, SessionMeta, SessionSnapshot, SessionStatus, TranscriptEntry,
+};
 
 /// 存储后端 trait — 所有方法都是 async
 ///

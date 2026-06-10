@@ -221,7 +221,7 @@ pub async fn compact_context_with_llm(
                 let mut kept: Vec<Msg> = Vec::new();
                 let h = (*head_count).min(before);
                 for m in messages.drain(..h) { kept.push(m); }
-                let remaining: Vec<Msg> = messages.drain(..).collect();
+                let remaining: Vec<Msg> = std::mem::take(messages);
                 let skip = remaining.len().saturating_sub(*tail_count);
                 for m in remaining.into_iter().skip(skip) { kept.push(m); }
                 *messages = kept;
@@ -322,12 +322,7 @@ fn sanitize_messages(messages: &mut Vec<Message>) {
                 true
             }
             Role::Tool => {
-                if has_pending_tool_use {
-                    has_pending_tool_use = false;
-                    true
-                } else {
-                    false // 孤立的 Tool 消息，移除
-                }
+                std::mem::take(&mut has_pending_tool_use)
             }
             _ => true,
         }

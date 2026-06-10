@@ -16,8 +16,9 @@ pub mod worker;
 use serde::{Deserialize, Serialize};
 
 /// 编排模式
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum OrchestratorMode {
+    #[default]
     Sequential,
     Parallel,
     Collaborative,
@@ -43,10 +44,6 @@ impl std::str::FromStr for OrchestratorMode {
             _ => Err(format!("Unknown mode: {}", s)),
         }
     }
-}
-
-impl Default for OrchestratorMode {
-    fn default() -> Self { Self::Sequential }
 }
 
 /// 编排器配置

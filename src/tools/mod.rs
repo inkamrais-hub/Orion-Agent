@@ -327,22 +327,20 @@ impl Tool for BashTool {
 
         // ── 风险分级检查 ──────────────────────────────────────
         let risk = crate::core::r#loop::classify_bash_risk(cmd);
-        match risk {
-            crate::core::r#loop::BashRisk::Critical => {
-                return Ok(ToolResult {
-                    content: format!(
-                        "Command blocked: critical risk detected ({:?}). Command: {}",
-                        risk, cmd
-                    ),
-                    is_error: true,
-                    metadata: Some(serde_json::json!({
-                        "risk_level": "critical",
-                        "blocked": true,
-                    })),
-                });
-            }
-            _ => {} // High 及以下继续执行
+        if risk == crate::core::r#loop::BashRisk::Critical {
+            return Ok(ToolResult {
+                content: format!(
+                    "Command blocked: critical risk detected ({:?}). Command: {}",
+                    risk, cmd
+                ),
+                is_error: true,
+                metadata: Some(serde_json::json!({
+                    "risk_level": "critical",
+                    "blocked": true,
+                })),
+            });
         }
+        // High 及以下继续执行
 
         // ── Docker 沙箱模式 ──────────────────────────────────
         let config = crate::config::OrionConfig::load();

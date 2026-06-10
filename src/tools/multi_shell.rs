@@ -27,6 +27,8 @@ pub enum ShellKind {
 
 impl ShellKind {
     /// 从字符串解析
+    // Intentionally kept as public method; implementing FromStr would change the error type
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "powershell" | "pwsh" | "ps" => Some(Self::PowerShell),
@@ -159,6 +161,12 @@ pub struct MultiShellExecutor {
     default_shell: ShellKind,
 }
 
+impl Default for MultiShellExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiShellExecutor {
     pub fn new() -> Self {
         Self {
@@ -188,12 +196,8 @@ impl MultiShellExecutor {
         let mut cmd = tokio::process::Command::new(shell_cmd);
         cmd.arg(flag);
 
-        // 对于 WSL，直接传递命令
-        if shell == ShellKind::Wsl {
-            cmd.arg(command);
-        } else {
-            cmd.arg(command);
-        }
+        // 传递命令参数（WSL 和其他 Shell 使用相同的参数传递方式）
+        cmd.arg(command);
 
         // 如果有预设输入，通过 stdin 传入
         if let Some(_input_text) = input {
@@ -380,7 +384,7 @@ impl Tool for MultiShellTool {
         }
 
         let shell = input["shell"].as_str()
-            .and_then(|s| ShellKind::from_str(s));
+            .and_then(ShellKind::from_str);
 
         let pre_input = input["input"].as_str();
 

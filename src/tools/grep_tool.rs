@@ -164,6 +164,7 @@ struct ContextLine {
     text: String,
 }
 
+#[allow(clippy::too_many_arguments)] // Private helper; grouping params into a struct would add indirection without clarity benefit
 fn search_dir(
     dir: &std::path::Path,
     re: &regex::Regex,

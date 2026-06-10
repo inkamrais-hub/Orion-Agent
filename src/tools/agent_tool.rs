@@ -8,6 +8,12 @@ pub struct SubAgentTool {
     model_policy: SubAgentModelPolicy,
 }
 
+impl Default for SubAgentTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubAgentTool {
     pub fn new() -> Self {
         Self { model_policy: SubAgentModelPolicy::Inherit }

@@ -127,7 +127,7 @@ fn find_matches(
                 continue;
             }
             // 跳过默认排除 + 用户排除
-            if DEFAULT_IGNORES.contains(&name.as_str()) || user_ignore.iter().any(|i| *i == name) {
+            if DEFAULT_IGNORES.contains(&name.as_str()) || user_ignore.contains(&name) {
                 continue;
             }
             find_matches(&path, pattern, user_ignore, results, depth + 1);
@@ -174,14 +174,12 @@ fn matches_glob_segment(name: &str, segment: &str) -> bool {
     }
 
     // * 前缀通配
-    if segment.starts_with('*') {
-        let suffix = &segment[1..];
+    if let Some(suffix) = segment.strip_prefix('*') {
         return name.ends_with(suffix);
     }
 
     // * 后缀通配
-    if segment.ends_with('*') {
-        let prefix = &segment[..segment.len() - 1];
+    if let Some(prefix) = segment.strip_suffix('*') {
         return name.starts_with(prefix);
     }
 

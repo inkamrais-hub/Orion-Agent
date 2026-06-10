@@ -1,9 +1,9 @@
 //! Unified storage backend — single SQLite database
 //!
-//! Merges three previously separate storage backends into one:
-//! - `SessionManager` (JSONL files) — session transcripts and metadata
-//! - `AgentStore` (SQLite agents.db) — agent configs and file snapshots
-//! - `SessionStore` (SQLite sessions.db/orion.db) — sessions, turns, tool_calls
+//! Consolidates three previously separate storage concerns into one:
+//! - Agent configs and file snapshots (formerly `AgentStore`)
+//! - Sessions, turns, and tool calls (formerly `SessionStore`)
+//! - Session transcripts (formerly JSONL-based `SessionManager`)
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,14 +13,13 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::agent::store::{AgentConfigModel, RollbackAction, SessionSnapshot};
 use crate::session::store::{SessionAuditReport, ToolCallRecord, Turn};
 
 // ============================================================
 //  Types
 // ============================================================
 
-/// Unified session status (merges SessionManager and SessionStore variants)
+/// Unified session status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
@@ -42,6 +41,8 @@ impl SessionStatus {
         }
     }
 
+    // Intentionally returns Self with a default (Active) rather than Result; not the same as FromStr
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "active" => Self::Active,
@@ -69,7 +70,7 @@ pub struct SessionMeta {
     pub total_tokens: u64,
 }
 
-/// Transcript entry (replaces JSONL TranscriptEntry)
+/// Transcript entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptEntry {
     pub id: String,
@@ -79,6 +80,48 @@ pub struct TranscriptEntry {
     pub content: String,
     pub tool_calls: Option<serde_json::Value>,
     pub timestamp: String,
+}
+
+/// Agent configuration model (persisted to the `agents` table).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfigModel {
+    pub id: String,
+    pub name: String,
+    pub model: String,
+    pub system_prompt: String,
+    /// JSON array, e.g. `["read", "bash", "edit"]`
+    pub tools_json: String,
+    /// JSON array, e.g. `[{"name":"fs","command":"npx","args":["-y","@anthropic/mcp-fs"]}]`
+    pub mcp_servers_json: String,
+    pub max_turns: i64,
+    pub max_tool_calls: i64,
+    pub token_budget: i64,
+    pub thinking: bool,
+    pub reasoning_effort: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Session rollback snapshot (file backup taken before a tool executes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    pub snapshot_id: String,
+    pub session_id: String,
+    pub agent_id: String,
+    pub turn_index: i64,
+    pub tool_name: String,
+    pub target_path: String,
+    /// `None` = file did not exist before (newly created in this session).
+    pub content_before: Option<String>,
+    pub created_at: String,
+}
+
+/// Rollback action: describes how to restore a single file.
+#[derive(Debug, Clone)]
+pub struct RollbackAction {
+    pub target_path: String,
+    /// `Some` = restore file content, `None` = delete file (created this session).
+    pub content_before: Option<String>,
 }
 
 // ============================================================
@@ -594,7 +637,7 @@ impl UnifiedStore {
         let tool_calls_json = entry
             .tool_calls
             .as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()?;
         conn.execute(
             "INSERT INTO transcripts (id, session_id, parent_id, role, content, tool_calls_json, timestamp)
@@ -670,6 +713,7 @@ impl UnifiedStore {
         let conn = self.conn.lock().await;
 
         // First, collect turn row data
+        #[allow(clippy::type_complexity)] // SQL row tuple; a type alias would add indirection for a one-off query
         let turn_rows: Vec<(String, u32, String, String, Option<String>, String, u32)> = {
             let mut stmt = conn.prepare(
                 "SELECT turn_id, turn_index, role, content, thinking, created_at, tokens_used

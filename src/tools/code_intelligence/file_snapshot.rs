@@ -153,6 +153,7 @@ impl SnapshotStore {
     }
 
     /// 简化的差异算法
+    #[allow(clippy::needless_range_loop)] // Loop indices are used as position markers, not just for element access
     fn simple_diff<'a>(old_lines: &[&'a str], new_lines: &[&'a str]) -> Vec<DiffOp<'a>> {
         let mut ops = Vec::new();
         let old_len = old_lines.len();
@@ -289,7 +290,7 @@ impl SnapshotStore {
         // 更新索引
         self.index
             .entry(file_path.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(entry.clone());
 
         // 根据风险级别返回不同结果
@@ -367,7 +368,7 @@ impl SnapshotStore {
             .filter(|e| e.timestamp > target_time)
             .collect();
 
-        entries_to_reverse.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries_to_reverse.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
         for entry in entries_to_reverse {
             content = Self::reverse_apply(&content, &entry.changes);
@@ -539,7 +540,7 @@ impl SnapshotStore {
             for file_entry in std::fs::read_dir(dir_entry.path())? {
                 let file_entry = file_entry?;
                 let path = file_entry.path();
-                if path.extension().map_or(true, |e| e != "json") {
+                if path.extension().is_none_or(|e| e != "json") {
                     continue;
                 }
 
@@ -547,7 +548,7 @@ impl SnapshotStore {
                     if let Ok(entry) = serde_json::from_str::<SnapshotEntry>(&content) {
                         self.index
                             .entry(entry.file_path.clone())
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(entry);
                     }
                 }

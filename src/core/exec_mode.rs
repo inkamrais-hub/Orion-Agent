@@ -7,21 +7,16 @@
 use serde::{Deserialize, Serialize};
 
 /// 执行模式
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecMode {
     /// 辅助模式: 每个工具调用都需要用户明确确认
     Assist,
     /// 自动模式: 安全工具自动执行，危险工具需要确认
+    #[default]
     Auto,
     /// 规划模式: 不执行任何工具，只生成文本计划
     Plan,
-}
-
-impl Default for ExecMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl ExecMode {

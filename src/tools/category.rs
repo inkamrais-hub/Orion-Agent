@@ -69,6 +69,12 @@ pub struct CategoryRegistry {
     categories: HashMap<String, Arc<dyn ToolCategory>>,
 }
 
+impl Default for CategoryRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CategoryRegistry {
     pub fn new() -> Self {
         Self {

@@ -100,6 +100,12 @@ pub struct AgentBuilder {
     lazy_mode: bool,
 }
 
+impl Default for AgentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentBuilder {
     pub fn new() -> Self {
         Self {
@@ -213,7 +219,7 @@ impl AgentBuilder {
             Arc::new(self.tools)
         };
 
-        let registry = self.registry.unwrap_or_else(|| crate::agent::registry::AgentRegistry::new());
+        let registry = self.registry.unwrap_or_else(crate::agent::registry::AgentRegistry::new);
 
         Ok(Agent {
             config: self.config,

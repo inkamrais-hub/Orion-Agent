@@ -79,7 +79,7 @@ fn scan_file(root: &std::path::Path, path: &std::path::Path, q: &str, kf: Option
         let ln = i+1;
         for &(kw, kind) in &[("fn ","function"),("pub fn ","function"),("async fn ","function"),("pub async fn ","function"),("struct ","struct"),("pub struct ","struct"),("trait ","trait"),("pub trait ","trait"),("enum ","enum"),("pub enum ","enum"),("mod ","module"),("pub mod ","module")] {
             if let Some(name) = extract(t, kw) {
-                if kf.map_or(true, |f| f==kind) && !name.is_empty() {
+                if kf.is_none_or(|f| f==kind) && !name.is_empty() {
                     let sc = score(&name, q);
                     if sc > 0.0 { res.push(Sym{name,kind:kind.into(),file:format!("{}:{}",rel,ln),line:ln,signature:t.to_string(),score:sc}); }
                 }

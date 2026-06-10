@@ -373,7 +373,7 @@ impl ToolExecutor {
         let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
         // 7. StepObserver (含 Retry 循环)
-        let observer_action = self.run_observer_with_retry(&call, &mut result).await;
+        let observer_action = self.run_observer_with_retry(call, &mut result).await;
 
         // 8. 审计
         {

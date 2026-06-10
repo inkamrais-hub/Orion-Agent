@@ -87,6 +87,12 @@ struct PermissionRule {
     required_level: PermissionLevel,
 }
 
+impl Default for PermissionGuardrail {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PermissionGuardrail {
     pub fn new() -> Self {
         Self { rules: Vec::new() }
@@ -190,11 +196,19 @@ pub struct GuardrailChain {
     guardrails: Vec<Box<dyn Guardrail>>,
 }
 
+impl Default for GuardrailChain {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GuardrailChain {
     pub fn new() -> Self {
         Self { guardrails: Vec::new() }
     }
 
+    // Intentionally named `add` for builder-style chaining; not the same as std::ops::Add
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, guardrail: Box<dyn Guardrail>) -> Self {
         self.guardrails.push(guardrail);
         self

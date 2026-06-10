@@ -2,71 +2,78 @@ English | [中文](README.md)
 
 # Orion Agent Framework
 
-A modular AI Agent framework built in Rust. The goal is to provide a privately deployable, high-performance, and security-controllable Agent platform.
+A modular AI Agent framework built in Rust. Privately deployable, high-performance, security-controllable.
 
-> Current status: Early development (v0.1.0). Core engine is functional, platform layer is under construction.
+> Version: v0.1.0-beta. Core engine + CLI + REST API fully operational.
 
-## What It Can Do
+## Core Capabilities
 
-**Implemented (working):**
+**Agent Conversations** — `Agent::builder()` to create agents, `chat()` for single-turn / `chat_stream()` for SSE streaming. Three execution modes: Assist (confirm each step), Auto (safe tools auto-execute), Plan (text-only, no tools).
 
-- **Agent Chat** — Create agents via `Agent::builder()`, supports `chat()` for single-turn and `chat_stream()` for streaming
-- **Multi-model Support** — OpenAI-compatible API (DeepSeek/Qwen/Ollama etc.) + Anthropic Claude, switchable via config
-- **17+ Built-in Tools** — File read/write, code editing, shell execution, regex search, symbol search, web search, sub-agent, A2A communication, etc.
-- **MCP Protocol** — Connect to any MCP Server via stdio, with connection pooling (one subprocess per server name)
-- **Context Management** — 7 compaction strategies (Micro/Snip/Chunked/Auto/Reactive/Collapse), circuit breaker for consecutive failures
-- **Three-layer Cache** — L1 tool result cache + L2 context snapshot cache + file cache (mtime-aware)
-- **Safety Guardrails** — Permission ACL + Token budget + Bash risk classification (Safe→Critical) + Hook interceptors
-- **REST API + SSE** — `POST /api/chat` streams Agent events, `/api/agents` CRUD for configuration
-- **Session Management** — SQLite persistence, JSONL transcription, file rollback snapshots
-- **Audit Logging** — 9 event types, automatic sensitive information redaction
+**Multi-Model Support** — OpenAI-compatible API (DeepSeek v4-flash/v4-pro, Qwen, Ollama, etc.) + Anthropic Claude. Switch models via `models[]` in config. Supports thinking mode (reasoning chain pass-through).
 
-**Partially Implemented (runs but incomplete):**
+**17+ Built-in Tools** — File read/write, code editing (diff+rollback), shell execution (multi-terminal isolation), regex search, symbol search (cross-language AST), web search, nested sub-agents, A2A cross-process messaging, MCP protocol for external tools.
 
-- **Multi-Agent Orchestration** — Coordinator can decompose tasks into DAG via LLM and execute subtasks sequentially, but parallel/collaborative modes are not implemented
-- **REPL Interaction** — 17 slash commands (/model, /think, /think-level, etc.), but the UI is minimal
-- **Code Indexing** — Incremental indexing, symbol search, call chain analysis, but only for some languages
+**Unified Security Model** — PermissionBroker as single decision point: ExecPolicy (command whitelist) + GuardrailChain (ACL + token budget) + orionignore (sensitive file blocking). Bash commands rated on a 6-level risk scale (Safe → Critical).
 
-**Not Implemented (stubs or design only):**
+**REST API + SSE** — Axum framework, `POST /api/chat` streaming agent events, `/api/agents` CRUD, `/api/sessions/{id}/rollback`. Built-in API Key auth middleware + per-IP rate limiter.
 
-- Web UI frontend
-- Multi-tenancy / RBAC
-- Docker sandbox execution mode
-- Dynamic tool discovery (for reducing Token consumption)
+**UnifiedStore** — Single SQLite database replacing 3 legacy backends (JSONL + AgentStore + SessionStore). 6 tables covering agent configs, session metadata, transcripts, tool call records, file snapshots. SessionBackend async trait for future PostgreSQL migration.
+
+**Prompt Caching** — Three-section PromptBuilder (Static → Tool → Dynamic) maximizing prefix-match cache hits. DeepSeek automatic prefix caching, Anthropic cache_control.
+
+**Multi-Agent Orchestration** — Coordinator uses LLM to decompose tasks into DAGs, sequential execution with automatic retry on failure. MapReduce with token tracking.
+
+**Context Management** — 7 compaction strategies (Micro/Snip/Chunked/Auto/Reactive/Collapse), circuit breaker for consecutive failures. Three-layer cache (L1 tool results + L2 context snapshots + file mtime-aware).
+
+**Project-Scoped Memory** — Cross-session memory isolated by project, with time-decay auto-pruning.
 
 ## Tech Stack
 
-| Layer | Technology | Description |
+| Layer | Technology | Notes |
 |---|---|---|
-| Language | Rust 2021 | Main framework |
-| Async Runtime | Tokio (full features) | Async I/O, task scheduling |
-| HTTP Client | reqwest (optional) | OpenAI-compatible API calls |
-| Web Framework | Axum (optional) | REST API + SSE |
-| Database | rusqlite (bundled) | Session/Agent config persistence |
+| Language | Rust 2021 | Core framework |
+| Async Runtime | Tokio (full) | Async I/O, task scheduling |
+| HTTP Client | reqwest (optional) | LLM API calls + SSE streaming |
+| Web Framework | Axum 0.7 (optional) | REST API + SSE + middleware |
+| Database | rusqlite (bundled) | UnifiedStore persistence |
 | Cache | moka + DashMap | High-performance concurrent cache |
-| Logging | tracing + tracing-subscriber | Structured logging |
-| Error Handling | thiserror | Unified error types |
+| Logging | tracing + tracing-subscriber | Structured logging + JSON output |
+| Error Handling | thiserror | 10 unified error variants |
 | Serialization | serde + serde_json + serde_yaml | Config and data exchange |
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/inkamrais-hub/Orion-Agent.git
 cd Orion-Agent
 
-# Configure API Key
+# Set API Key (choose one)
+# Option 1: .env file
 cp .env.example .env
-# Edit .env, fill in your LLM_API_KEY
+# Edit .env, add LLM_API_KEY=sk-xxx
 
-# CLI mode
-cargo run
+# Option 2: Config file ~/.orion/config.yaml
 
-# REST API mode
-cargo run --features api -- serve
+# Run
+cargo run                          # CLI interactive mode
+cargo run --features api -- serve  # REST API mode
+cargo run -- --onlyrun "task"      # One-shot execution
+```
 
-# One-shot task
-cargo run -- --onlyrun "Write an HTTP server in Rust"
+### Config Example (~/.orion/config.yaml)
+
+```yaml
+default_model: deepseek-chat
+
+models:
+  - name: deepseek-chat
+    endpoint: https://api.deepseek.com
+    api_key: sk-your-key-here
+    max_tokens: 4096
+    max_input_tokens: 128000
+    thinking: false
+    prompt_cache: true
 ```
 
 ## Project Structure
@@ -75,96 +82,146 @@ cargo run -- --onlyrun "Write an HTTP server in Rust"
 src/
 ├── core/               # Core engine
 │   ├── agent.rs        # Agent struct + Builder + AgentEvent
-│   ├── loop.rs         # Core execution loop (streaming LLM + tool execution)
+│   ├── loop.rs         # Core execution loop (streaming LLM + tool exec)
 │   ├── provider.rs     # Provider trait (LLM abstraction)
-│   ├── providers/      # OpenAI-compatible + Anthropic implementations
+│   ├── providers/      # OpenAI-compat + Anthropic implementations
+│   ├── prompt.rs       # Three-section PromptBuilder
+│   ├── permission_broker.rs  # Unified security decision point
+│   ├── exec_mode.rs    # Execution modes (Assist/Auto/Plan)
+│   ├── execpolicy.rs   # Command whitelist policy
+│   ├── guardrail.rs    # ACL + token budget guardrails
+│   ├── hooks.rs        # YAML-configured hook interceptors
 │   ├── context.rs      # Context management + 7 compaction strategies
 │   ├── cache.rs        # Three-layer cache system
-│   ├── guardrail.rs    # Permission + budget guardrails
-│   ├── hooks.rs        # YAML-configured Hook interceptors
-│   ├── execpolicy.rs   # Command execution whitelist policy
-│   ├── goal.rs         # Goal state machine + auto-steering
-│   ├── workspace.rs    # Workspace security guard
+│   ├── goal.rs         # Goal state machine + auto-continue
+│   ├── orionignore.rs  # Sensitive file detection + ignore rules
 │   └── audit.rs        # Low-level audit logging
 ├── tools/              # Tool system
-│   ├── mod.rs          # Read/Write/Bash core tools
 │   ├── registry.rs     # Tool registry + AOP path interception
-│   ├── mcp.rs          # MCP client + connection pool
-│   ├── edit.rs         # Precise string replacement
-│   ├── grep_tool.rs    # Regex content search
-│   ├── glob_tool.rs    # Filename search
-│   ├── multi_shell.rs  # Multi-terminal tool
-│   ├── web_search.rs   # Web search
-│   ├── agent_tool.rs   # Sub-agent creation
-│   └── code_intelligence/  # Symbol search, call chain, project map
-├── agent/              # Agent runtime
-│   ├── runtime.rs      # AgentRuntime data container
-│   ├── registry.rs     # Agent registry (A2A communication)
-│   ├── store.rs        # Agent config SQLite persistence + rollback snapshots
-│   ├── lanes.rs        # Execution lanes (resource contention prevention)
-│   └── protocol.rs     # A2A protocol messages
+│   ├── mcp.rs          # MCP client + connection pooling
+│   ├── multi_shell.rs  # Multi-terminal isolated execution
+│   ├── web_search.rs   # Web search (multilingual)
+│   ├── agent_tool.rs   # Sub-agent creation + A2A messaging
+│   ├── category.rs     # Tool category registry (lazy loading)
+│   └── code_intelligence/  # Symbol search, call chains, dep graph
+├── agent/              # Inter-agent communication
+│   ├── protocol.rs     # A2A protocol (correlation_id + TaskLifecycle)
+│   ├── registry.rs     # Agent registry
+│   ├── runtime.rs      # AgentMessage + MessageHandler trait
+│   └── lanes.rs        # Lane constants + LaneToken
 ├── orchestrator/       # Multi-agent orchestration
-│   ├── coordinator.rs  # Coordinator (LLM task decomposition + DAG scheduling)
-│   ├── plan.rs         # TaskPlan (dependency resolution + state tracking)
-│   └── worker.rs       # Worker (subtask execution)
-├── session/            # Session management
-│   ├── store.rs        # SQLite persistence (4 tables + indexes)
-│   ├── manager.rs      # JSONL transcription + JSON indexing
-│   ├── memory.rs       # Cross-session memory system
-│   ├── files.rs        # Directory structure management (soft delete/restore)
-│   └── rollout.rs      # JSONL event stream (immutable audit)
-├── api/                # REST API (feature-gated)
-├── cli/                # Chat loop + command handling (chat/ internal split)
-├── gateway/            # Entry routing
-├── config.rs           # YAML config + environment variable substitution
-├── model/              # Model registry
-├── audit/              # High-level audit log management
-├── logging/            # Logging subsystem + sensitive info redaction
-└── index/              # Code indexing engine
+│   ├── coordinator.rs  # LLM-based DAG decomposition + retry
+│   ├── plan.rs         # TaskPlan (dependency resolution)
+│   ├── map_reduce.rs   # MapReduce with token tracking
+│   └── worker.rs       # Subtask execution
+├── session/            # Persistence
+│   ├── unified.rs      # UnifiedStore (single SQLite, 6 tables)
+│   ├── backend.rs      # SessionBackend async trait (16 methods)
+│   ├── memory.rs       # Project-scoped memory (decay + pruning)
+│   ├── store.rs        # Session SQLite (turn-level records)
+│   ├── rollout.rs      # JSONL event stream (immutable audit)
+│   └── files.rs        # Directory structure management
+├── api/                # REST API + auth + rate limiting (feature-gated)
+├── cli/                # CLI interactive (chat/ submodule)
+├── gateway/            # Entry routing + command system
+├── config.rs           # YAML config + ${ENV_VAR} substitution
+├── model/              # Model config + router
+├── audit/              # High-level audit management
+├── logging/            # Logging subsystem + PII redaction
+├── index/              # Incremental code indexing engine
+└── ui/                 # CLI UI components (progress, reports)
 ```
 
-## Architecture
-
-Core execution flow:
+## Architecture Flow
 
 ```
 User Input
   ↓
+Gateway → CLI / WebUI / --onlyrun
+  ↓
 Agent::chat_stream(input)
   ↓
 run_simple_loop()
-  ├── Provider.stream() → Streaming LLM call
-  ├── Tool execution (parallel readonly / serial write)
-  │   ├── ExecPolicy command whitelist check
-  │   ├── GuardrailChain guardrail check
-  │   ├── HookEngine before/after interception
-  │   ├── ToolRegistry AOP path normalization
-  │   └── StepObserver retry/replan judgment
-  ├── ContextManager context compression
+  ├── Provider.stream() → Streaming LLM call (SSE)
+  ├── PermissionBroker → Security decision
+  │   ├── ExecPolicy command whitelist
+  │   ├── GuardrailChain ACL + budget
+  │   └── orionignore sensitive file blocking
+  ├── Tool Execution (read-only parallel / write serial)
+  │   ├── ToolRegistry AOP path interception
+  │   ├── HookEngine before/after hooks
+  │   └── StepObserver retry/replan detection
+  ├── PromptBuilder → Three-section prompt (cache-friendly)
+  ├── ContextManager context compaction
   ├── GlobalCache cache hit check
-  ├── AuditLogger audit recording
-  └── RolloutRecorder event stream recording
+  └── UnifiedStore persistence (transcripts + snapshots)
   ↓
-AgentEvent → SSE streaming output
+AgentEvent → SSE / CLI streaming output
 ```
 
-## Current Limitations (Honest Assessment)
+## REST API
 
-1. **No Web UI** — Only REST API available, frontend needs to be built separately
-2. **Limited Orchestration** — Coordinator only supports sequential execution, parallel/collaborative modes are stubs
-3. **No Dynamic Tool Discovery** — Every conversation sends full schemas for all tools, resulting in higher Token consumption
-4. **Insufficient Test Coverage** — 68 unit tests exist, but lacks integration and end-to-end tests
-5. **Documentation Gaps** — Code has comments, but lacks API documentation and usage tutorials
-6. **Some Modules Are Stubs** — `src/events/`, `src/plugins/` directories are empty
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Health check |
+| GET | `/api/agents` | List all agent configs |
+| POST | `/api/agents` | Create agent config |
+| GET | `/api/agents/{id}` | Get agent config |
+| PUT | `/api/agents/{id}` | Update agent config |
+| DELETE | `/api/agents/{id}` | Delete agent config |
+| GET | `/api/tools` | List available tools |
+| POST | `/api/chat` | SSE streaming conversation |
+| POST | `/api/sessions/{id}/rollback` | Session rollback |
+
+## Code Example
+
+```rust
+use orion_agent::prelude::*;
+use orion_agent::core::providers::openai_compat::OpenAICompatProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() {
+    let provider = Arc::new(OpenAICompatProvider::from_env());
+
+    let agent = Agent::builder()
+        .name("my-agent")
+        .model("deepseek-v4-flash")
+        .system_prompt("You are a Rust expert.")
+        .provider(provider)
+        .max_turns(10)
+        .build()
+        .unwrap();
+
+    let reply = agent.chat("What is ownership?").await.unwrap();
+    println!("{}", reply);
+}
+```
+
+## Testing
+
+```bash
+cargo test                              # All unit tests (149 tests)
+cargo test --test deepseek_integration  # DeepSeek API integration tests
+cargo clippy --all-targets              # Zero clippy warnings
+```
+
+## Known Limitations
+
+- **No Web UI frontend** — REST API is complete, frontend must be built separately
+- **Orchestration** — Coordinator supports sequential DAG only; parallel/collaborative modes are planned
+- **Tool discovery** — `lazy_tools()` implements meta-tool mode but is not yet wired into CLI/API paths
+- **Code indexing** — Supports Rust/Python/JavaScript/Go/TypeScript; other languages need extension
+- **Single process** — No horizontal scaling (SQLite limitation; SessionBackend trait reserved for future)
 
 ## Roadmap
 
-- [ ] Web UI frontend (React/Vue)
-- [ ] MCP dynamic tool discovery (reduce initial Token consumption)
-- [ ] Coordinator parallel execution mode
+- [ ] Web UI frontend
+- [ ] Coordinator parallel execution + collaborative mode
 - [ ] Docker sandbox execution
-- [ ] Better test coverage
-- [ ] API documentation (OpenAPI)
+- [ ] PostgreSQL SessionBackend implementation
+- [ ] OpenAPI documentation
+- [ ] Multi-tenancy / RBAC
 
 ## License
 

@@ -183,6 +183,12 @@ impl AuditLogger {
 /// 无操作审查器 — 所有 record 都静默丢弃
 pub struct NullAuditLogger;
 
+impl Default for NullAuditLogger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NullAuditLogger {
     pub fn new() -> Self {
         Self

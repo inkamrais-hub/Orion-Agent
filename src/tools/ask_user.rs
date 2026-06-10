@@ -30,7 +30,7 @@ impl Tool for AskUserTool {
         use std::io::Write;
         std::io::stderr().flush().ok();
         let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer).map_err(|e|crate::Error::Io(e))?;
+        std::io::stdin().read_line(&mut answer).map_err(crate::Error::Io)?;
         let answer = answer.trim().to_string();
         if answer.is_empty() {
             Ok(ToolResult { content: "User did not respond".into(), is_error: false, metadata: None })

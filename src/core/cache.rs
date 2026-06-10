@@ -560,7 +560,7 @@ fn normalize_json(value: &serde_json::Value) -> String {
             format!("{{{}}}", parts.join(","))
         }
         serde_json::Value::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(|v| normalize_json(v)).collect();
+            let parts: Vec<String> = arr.iter().map(normalize_json).collect();
             format!("[{}]", parts.join(","))
         }
         _ => serde_json::to_string(value).unwrap_or_default(),

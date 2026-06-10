@@ -89,7 +89,7 @@ pub fn analyze_file_deps(root: &Path, language: &str) -> FileDepGraph {
             for imp in &imports {
                 graph.imported_by
                     .entry(imp.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(file_str.clone());
             }
             graph.imports.insert(file_str, imports);
@@ -334,6 +334,6 @@ fn extract_field(toml_str: &str, field: &str) -> Option<String> {
     let pattern = format!("{} = ", field);
     let start = toml_str.find(&pattern)?;
     let rest = &toml_str[start + pattern.len()..];
-    let end = rest.find(|c: char| c == ',' || c == '}' || c == '\n').unwrap_or(rest.len());
+    let end = rest.find([',', '}', '\n']).unwrap_or(rest.len());
     Some(rest[..end].trim().trim_matches('"').to_string())
 }

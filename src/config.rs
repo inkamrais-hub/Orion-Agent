@@ -287,7 +287,7 @@ fn substitute_env(input: &str) -> String {
             chars.next();
             let mut var_name = String::new();
             let mut found = false;
-            while let Some(nc) = chars.next() {
+            for nc in chars.by_ref() {
                 if nc == '}' { found = true; break; }
                 var_name.push(nc);
             }

@@ -40,9 +40,8 @@ pub fn should_ignore_with_reason(path: &Path) -> Option<String> {
             if path_str.contains(pattern) {
                 return Some(format!("matches ignore pattern '{}'", pattern));
             }
-        } else if pattern.starts_with("*.") {
+        } else if let Some(ext) = pattern.strip_prefix("*.") {
             // 扩展名模式
-            let ext = &pattern[2..];
             if path_str.ends_with(ext) {
                 return Some(format!("matches extension pattern '{}'", pattern));
             }
@@ -103,7 +102,7 @@ pub fn is_sensitive_file_path(path_str: &str) -> bool {
         ".npmrc",
         ".pypirc",
     ];
-    if sensitive_names.iter().any(|n| file_name == *n) {
+    if sensitive_names.contains(&file_name) {
         return true;
     }
 

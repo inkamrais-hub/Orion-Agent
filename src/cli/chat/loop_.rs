@@ -128,9 +128,9 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
     let mut system_prompt = crate::cli::execute::build_system_prompt(&state.tools);
     let memory_ctx = state.memory.as_context();
     if !memory_ctx.is_empty() {
-        system_prompt.push_str("\n");
+        system_prompt.push('\n');
         system_prompt.push_str(&memory_ctx);
-        system_prompt.push_str("\n");
+        system_prompt.push('\n');
     }
 
     eprintln!("⚡ Orion Agent ready | model: {} | tools: {} | session: {} | memories: {}",

@@ -36,6 +36,12 @@ impl Clone for ToolRegistry {
     }
 }
 
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -180,10 +186,7 @@ impl ToolRegistry {
             None
         };
         let content_before = if let Some(ref path_str) = snapshot_path {
-            match tokio::fs::read_to_string(path_str).await {
-                Ok(content) => Some(content),
-                Err(_) => None, // 文件不存在（新建场景）
-            }
+            tokio::fs::read_to_string(path_str).await.ok()
         } else {
             None
         };
@@ -203,6 +206,10 @@ impl ToolRegistry {
 
     pub fn len(&self) -> usize {
         self.tools.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
     }
 }
 
@@ -276,7 +283,7 @@ async fn save_file_snapshot(
     }
 
     if let Some(store) = store {
-        let snapshot = crate::agent::store::SessionSnapshot {
+        let snapshot = crate::session::unified::SessionSnapshot {
             snapshot_id: uuid::Uuid::new_v4().to_string(),
             session_id: ctx.session_id.clone(),
             agent_id: ctx.agent_id.clone(),

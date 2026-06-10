@@ -8,10 +8,11 @@ pub use crate::config::OrionConfig as Config;
 use serde::{Deserialize, Serialize};
 
 /// SubAgent 模型策略
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum SubAgentModelPolicy {
     #[serde(rename = "inherit")]
+    #[default]
     Inherit,
     #[serde(rename = "custom")]
     Custom {
@@ -19,8 +20,4 @@ pub enum SubAgentModelPolicy {
         endpoint: String,
         api_key: Option<String>,
     },
-}
-
-impl Default for SubAgentModelPolicy {
-    fn default() -> Self { Self::Inherit }
 }

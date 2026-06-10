@@ -36,6 +36,12 @@ pub struct WebSearchTool {
     client: Option<Arc<reqwest::Client>>,
 }
 
+impl Default for WebSearchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebSearchTool {
     /// 创建直连模式 (DuckDuckGo)
     pub fn new() -> Self {
@@ -111,7 +117,7 @@ impl WebSearchTool {
 
     /// 检测文本是否包含中文
     fn has_chinese(text: &str) -> bool {
-        text.chars().any(|c| c >= '\u{4e00}' && c <= '\u{9fff}')
+        text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
     }
 
     /// 生成多语言查询变体
@@ -190,6 +196,7 @@ impl Tool for WebSearchTool {
         let mut engines_used = Vec::new();
 
         for q in &queries {
+            #[allow(clippy::needless_update)] // SearchOptions may gain fields in future crate versions
             let options = SearchOptions {
                 max_results,
                 ..SearchOptions::default()

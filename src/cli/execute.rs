@@ -137,6 +137,7 @@ pub fn create_cli_event_callback() -> EventCallback {
     })
 }
 
+#[allow(clippy::too_many_arguments)] // Public API entry point; grouping params into a struct would be a breaking change
 pub async fn execute_turn(
     provider: &dyn crate::core::provider::Provider,
     tools: &ToolRegistry,
@@ -247,7 +248,7 @@ fn flush_thinking(buf: &std::sync::Mutex<String>, active: &std::sync::Mutex<bool
         let content = buf.lock().unwrap().clone();
         if !content.is_empty() {
             let header = " Thinking ";
-            let pad = "─".repeat(w.saturating_sub(header.len() + 2).max(0));
+            let pad = "─".repeat(w.saturating_sub(header.len() + 2));
             eprintln!("╭─{}{}╮", header, pad);
             for para in content.split("\n\n") {
                 let trimmed = para.trim();
@@ -264,14 +265,14 @@ fn flush_thinking(buf: &std::sync::Mutex<String>, active: &std::sync::Mutex<bool
 
 fn print_box(title: &str, w: usize) {
     let header = format!(" {} ", title);
-    let pad = "─".repeat(w.saturating_sub(header.len() + 2).max(0));
+    let pad = "─".repeat(w.saturating_sub(header.len() + 2));
     eprintln!("\n╭─{}{}╮", header, pad);
     eprintln!("╰{}╯", "─".repeat(w));
 }
 
 fn print_result_box(title: &str, content: &str, max_chars: usize, w: usize) {
     let header = format!(" {} ", title);
-    let pad = "─".repeat(w.saturating_sub(header.len() + 2).max(0));
+    let pad = "─".repeat(w.saturating_sub(header.len() + 2));
     eprintln!("╭─{}{}╮", header, pad);
     let output = truncate_str(content, max_chars);
     for line in output.lines() {

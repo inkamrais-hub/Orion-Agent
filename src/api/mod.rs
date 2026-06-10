@@ -28,7 +28,7 @@ use serde::Deserialize;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use crate::agent::store::AgentConfigModel;
+use crate::session::unified::AgentConfigModel;
 use crate::session::UnifiedStore;
 use crate::config::OrionConfig;
 use crate::core::agent::{Agent, AgentEvent};

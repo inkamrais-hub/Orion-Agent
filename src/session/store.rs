@@ -315,6 +315,7 @@ impl SessionStore {
 
     /// 获取 Session 的所有 Turn
     pub fn get_turns(&self, session_id: &str) -> crate::Result<Vec<Turn>> {
+        #[allow(clippy::type_complexity)] // SQL row tuple; a type alias would add indirection for a one-off query
         let turn_ids: Vec<(String, u32, String, String, Option<String>, String, u32)> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn.prepare(

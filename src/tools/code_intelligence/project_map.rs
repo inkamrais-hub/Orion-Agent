@@ -64,7 +64,7 @@ fn detect_language(root: &std::path::Path) -> &str {
     else { "Unknown" }
 }
 
-fn build_tree(root:&std::path::Path,dir:&std::path::Path,max_d:usize,d:usize,stats:&mut Stats)->String{
+fn build_tree(_root:&std::path::Path,dir:&std::path::Path,max_d:usize,d:usize,stats:&mut Stats)->String{
     if d>=max_d{return String::new();}
     let mut result=String::new();
     let Ok(entries)=std::fs::read_dir(dir)else{return result;};
@@ -82,7 +82,7 @@ fn build_tree(root:&std::path::Path,dir:&std::path::Path,max_d:usize,d:usize,sta
     let indent = "  ".repeat(d);
     for (n, p) in dirs {
         result.push_str(&format!("{}{}/\n", indent, n));
-        result.push_str(&build_tree(root, &p, max_d, d + 1, stats));
+        result.push_str(&build_tree(_root, &p, max_d, d + 1, stats));
     }
     for n in files {
         result.push_str(&format!("{}{}\n", indent, n));

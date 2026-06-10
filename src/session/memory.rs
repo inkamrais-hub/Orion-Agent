@@ -62,7 +62,7 @@ fn hash_project_path(path: &str) -> String {
 
 /// Return the storage directory for a given project path.
 /// - `None`           -> `<data_dir>/`            (global memories)
-/// `Some(project)`    -> `<data_dir>/projects/{hash}/`
+///   `Some(project)`    -> `<data_dir>/projects/{hash}/`
 fn memory_storage_dir(project_path: Option<&str>) -> PathBuf {
     let base = crate::config::data_dir_path();
     match project_path {

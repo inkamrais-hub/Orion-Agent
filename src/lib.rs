@@ -6,15 +6,24 @@
 //! agent-framework
 //! ├── core/           # 核心抽象层
 //! │   ├── provider    # LLM 提供商抽象
-//! │   ├── guardrail   # 护栏系统 (Permission/Budget/Hook)
-//! │   ├── cache       # 分层缓存系统
-//! │   ├── context     # 上下文管理 + 压缩
-//! │   └── loop        # 核心查询循环
+//! │   ├── agent       # Agent 构建器 + 对话接口
+//! │   ├── loop        # 核心查询循环
+//! │   ├── prompt      # 三段式 Prompt 构建器
+//! │   ├── permission_broker # 统一安全决策
+//! │   ├── exec_mode   # 执行模式 (Assist/Auto/Plan)
+//! │   ├── execpolicy  # 命令权限策略
+//! │   ├── guardrail   # 护栏系统
+//! │   ├── cache       # 分层缓存
+//! │   └── context     # 上下文管理
 //! ├── tools/          # 工具系统
 //! │   └── registry   # 工具注册表
-//! └── agent/          # Agent 运行时
-//!     ├── runtime    # Agent 执行体
-//!     └── lanes      # 执行车道 (Lane 系统)
+//! ├── session/        # 会话持久化
+//! │   ├── unified    # UnifiedStore (单一 SQLite)
+//! │   ├── backend    # SessionBackend trait
+//! │   └── memory     # 项目维度记忆
+//! └── agent/          # Agent 间通信
+//!     ├── protocol   # A2A 协议
+//!     └── registry   # Agent 注册表
 //! ```
 
 pub mod core;

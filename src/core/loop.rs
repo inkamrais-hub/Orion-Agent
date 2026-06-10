@@ -200,6 +200,12 @@ pub struct StepObserver {
     max_consecutive_errors: u32,
 }
 
+impl Default for StepObserver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StepObserver {
     pub fn new() -> Self {
         Self {
@@ -302,10 +308,10 @@ fn estimate_text_tokens(text: &str) -> u64 {
             whitespace_chars += 1;
         } else if ch.is_ascii() {
             ascii_chars += 1;
-        } else if ch >= '\u{4e00}' && ch <= '\u{9fff}' {
+        } else if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
             // CJK 统一汉字
             chinese_chars += 1;
-        } else if ch >= '\u{3000}' && ch <= '\u{303f}' {
+        } else if ('\u{3000}'..='\u{303f}').contains(&ch) {
             // CJK 标点
             chinese_chars += 1;
         } else {
@@ -366,7 +372,7 @@ async fn compact_context(
     }
 }
 
-/// 简化查询循环 — 不依赖 AgentRuntime
+/// 简化查询循环 — 基于 core::agent::Agent
 ///
 /// 供 Worker/Orchestrator 使用，直接传入各组件
 /// 已串联: Hooks, ExecPolicy, Rollout, Goal
@@ -690,7 +696,7 @@ pub async fn run_simple_loop<'a>(
             provider.stream(provider_req, stream_tx),
         ).await;
 
-        if let Err(_) = stream_result {
+        if stream_result.is_err() {
             return LoopOutcome::Error { message: "Stream timeout".into() };
         }
         if let Ok(Err(e)) = stream_result {

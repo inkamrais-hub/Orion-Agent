@@ -63,18 +63,13 @@ pub struct HookMatch {
 }
 
 /// 匹配值 (支持单个字符串或数组)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(untagged)]
 pub enum MatchValue {
     Single(String),
     Multiple(Vec<String>),
+    #[default]
     None,
-}
-
-impl Default for MatchValue {
-    fn default() -> Self {
-        MatchValue::None
-    }
 }
 
 impl MatchValue {
