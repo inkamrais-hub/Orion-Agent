@@ -430,6 +430,165 @@ pub struct SimpleLoopContext<'a> {
     pub guardrails: Option<&'a crate::core::guardrail::GuardrailChain>,
 }
 
+/// 循环状态封装 — 集中管理 run_simple_loop 的所有可变状态
+///
+/// 替代原循环体内散落的 turn_number/tool_call_count/messages/total_usage 等局部变量，
+/// 提供统一的状态管理接口，简化主循环逻辑。
+pub struct LoopState {
+    /// 轮次计数
+    pub turn_number: u64,
+    /// 工具调用计数
+    pub tool_call_count: u64,
+    /// 消息历史
+    pub messages: Vec<Message>,
+    /// 总的 token 使用量
+    pub total_usage: UsageInfo,
+    /// token 预算跟踪器
+    pub token_budget_tracker: TokenBudget,
+    /// 当前目标 ID
+    pub current_goal_id: Option<String>,
+    /// 步骤观察器
+    pub observer: StepObserver,
+    /// 缓存断点跟踪器
+    pub cache_tracker: crate::core::cache::CacheBreakTracker,
+}
+
+impl LoopState {
+    /// 创建初始状态
+    pub fn new(token_budget: u64) -> Self {
+        Self {
+            turn_number: 0,
+            tool_call_count: 0,
+            messages: Vec::new(),
+            total_usage: UsageInfo::default(),
+            token_budget_tracker: TokenBudget::new(token_budget, token_budget),
+            current_goal_id: None,
+            observer: StepObserver::new(),
+            cache_tracker: crate::core::cache::CacheBreakTracker::new(),
+        }
+    }
+
+    /// 增加轮次计数
+    pub fn increment_turn(&mut self) {
+        self.turn_number += 1;
+    }
+
+    /// 增加工具调用计数
+    pub fn increment_tool_call(&mut self) {
+        self.tool_call_count += 1;
+    }
+
+    /// 添加消息到历史
+    pub fn add_message(&mut self, message: Message) {
+        self.messages.push(message);
+    }
+
+    /// 检查是否超过最大轮次
+    pub fn exceeds_max_turns(&self, max: u64) -> bool {
+        self.turn_number > max
+    }
+
+    /// 检查是否超过最大工具调用数
+    pub fn exceeds_max_tool_calls(&self, max: u64) -> bool {
+        self.tool_call_count > max
+    }
+
+    /// 记录 token 使用量 (累加并通知预算跟踪器)
+    pub fn record_usage(&mut self, usage: &UsageInfo) {
+        self.total_usage.input_tokens += usage.input_tokens;
+        self.total_usage.output_tokens += usage.output_tokens;
+        self.token_budget_tracker.record_usage(usage);
+    }
+
+    /// 获取当前轮次号
+    pub fn turn(&self) -> u64 {
+        self.turn_number
+    }
+
+    /// 克隆当前总使用量 (用于返回 LoopOutcome)
+    pub fn usage_clone(&self) -> UsageInfo {
+        self.total_usage.clone()
+    }
+
+    /// 借读消息历史
+    pub fn messages_ref(&self) -> &Vec<Message> {
+        &self.messages
+    }
+
+    /// 借写消息历史
+    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+        &mut self.messages
+    }
+
+    /// 借写步骤观察器
+    pub fn observer_mut(&mut self) -> &mut StepObserver {
+        &mut self.observer
+    }
+
+    /// 借写缓存断点跟踪器
+    pub fn cache_tracker_mut(&mut self) -> &mut crate::core::cache::CacheBreakTracker {
+        &mut self.cache_tracker
+    }
+
+    /// 设置当前目标 ID
+    pub fn set_goal_id(&mut self, id: String) {
+        self.current_goal_id = Some(id);
+    }
+
+    /// 借读当前目标 ID
+    pub fn goal_id(&self) -> Option<&String> {
+        self.current_goal_id.as_ref()
+    }
+}
+
+/// 上下文管理器 — 封装消息压缩策略
+///
+/// 集中处理"消息过多时压缩"逻辑，使用 Auto 策略（LLM 摘要），
+/// 失败时回退到 Micro 策略（保留最近 N 条简单裁剪）。
+pub struct ContextManager<'a> {
+    provider: Option<&'a dyn crate::core::provider::Provider>,
+    model: &'a str,
+    cache_tracker: &'a mut crate::core::cache::CacheBreakTracker,
+    /// 触发压缩的消息数量阈值
+    threshold: usize,
+}
+
+impl<'a> ContextManager<'a> {
+    /// 创建上下文管理器
+    pub fn new(
+        provider: Option<&'a dyn crate::core::provider::Provider>,
+        model: &'a str,
+        cache_tracker: &'a mut crate::core::cache::CacheBreakTracker,
+    ) -> Self {
+        Self { provider, model, cache_tracker, threshold: 50 }
+    }
+
+    /// 检查消息数量，超过阈值时自动压缩
+    /// 使用 Auto 策略（LLM 摘要），失败时回退到 Micro 策略
+    pub async fn check_and_compact(&mut self, messages: &mut Vec<Message>) {
+        if messages.len() > self.threshold {
+            self.compact_with_fallback(messages).await;
+        }
+    }
+
+    async fn compact_with_fallback(&mut self, messages: &mut Vec<Message>) {
+        // 用 Auto 策略（LLM 摘要）替代 Snip，避免破坏 tool_use/tool_result 配对
+        let strategy = CompactionStrategy::Auto { summary_target_tokens: 2000 };
+        let result = compact_context(messages, &strategy, self.provider, self.model).await;
+        if let Some(r) = result {
+            self.cache_tracker.record(crate::core::cache::CacheBreakVector::ContextCompaction);
+            info!(
+                "Simple loop compacted: {} -> {} messages, freed {} tokens | CacheBreak: ContextCompaction",
+                r.messages_before, r.messages_after, r.tokens_freed
+            );
+        } else {
+            // Auto 失败时用 Micro（保留最近 5 条，简单裁剪）
+            let strategy = CompactionStrategy::Micro { keep_recent: 5 };
+            let _ = compact_context(messages, &strategy, None, self.model).await;
+        }
+    }
+}
+
 pub async fn run_simple_loop<'a>(
     provider: &dyn crate::core::provider::Provider,
     tools: &ToolRegistry,
@@ -456,11 +615,9 @@ pub async fn run_simple_loop<'a>(
     let agent_id = config.agent_id.clone();
     let model_caps = Some(config.model_caps.clone());
     let agent_id = if agent_id.is_empty() { "simple_loop".to_string() } else { agent_id };
-    let mut turn_number: u64 = 0;
-    let mut tool_call_count: u64 = 0;
-    let mut messages: Vec<Message> = Vec::new();
-    let mut total_usage = UsageInfo::default();
-    let mut token_budget_tracker = TokenBudget::new(token_budget, token_budget);
+
+    // 初始化循环状态 (集中管理所有可变状态)
+    let mut state = LoopState::new(token_budget);
 
     // 构建用户消息 (文本 + 图片)
     let mut user_content: Vec<ContentBlock> = Vec::new();
@@ -468,7 +625,7 @@ pub async fn run_simple_loop<'a>(
         user_content.extend(imgs);
     }
     user_content.push(ContentBlock::Text { text: user_input.to_string() });
-    messages.push(Message {
+    state.add_message(Message {
         role: Role::User,
         content: user_content,
         reasoning_content: None,
@@ -481,24 +638,21 @@ pub async fn run_simple_loop<'a>(
     }
 
     // Goal: 创建目标
-    let mut current_goal_id: Option<String> = None;
     if let Some(ref mut gm) = goal_manager {
         let gid = gm.create("agent task", token_budget / 2);
-        current_goal_id = Some(gid);
+        state.set_goal_id(gid);
     }
 
-    let mut observer = StepObserver::new();
-    let mut cache_tracker = crate::core::cache::CacheBreakTracker::new();
     let _loop_start = std::time::Instant::now();
-    cache_tracker.record(crate::core::cache::CacheBreakVector::NewMessage);
+    state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::NewMessage);
     info!("CacheBreak: NewMessage (user input) at loop start");
 
     loop {
-        turn_number += 1;
-        if turn_number > max_turns {
+        state.increment_turn();
+        if state.exceeds_max_turns(max_turns) {
             return LoopOutcome::MaxTurnsReached {
                 message: format!("Reached max turns ({})", max_turns),
-                usage: total_usage,
+                usage: state.usage_clone(),
             };
         }
 
@@ -511,7 +665,7 @@ pub async fn run_simple_loop<'a>(
         let tool_defs = tools.definitions();
         let provider_req = ProviderRequest {
             model: model.to_string(),
-            messages: messages.clone(),
+            messages: state.messages_ref().clone(),
             system_prompt: Some(system_prompt.to_string()),
             max_tokens: Some(caps.max_output_tokens as u64),
             temperature: Some(0.7),
@@ -582,9 +736,8 @@ pub async fn run_simple_loop<'a>(
             }
         }
 
-        total_usage.input_tokens += stream_usage.input_tokens;  // B2B 计费: 每轮都实际消耗 token，累加
-        total_usage.output_tokens += stream_usage.output_tokens;
-        token_budget_tracker.record_usage(&stream_usage);
+        // 累加 token 使用并通知预算跟踪器
+        state.record_usage(&stream_usage);
 
         // 审计: LLM 请求
         {
@@ -596,9 +749,9 @@ pub async fn run_simple_loop<'a>(
             }, "loop");
         }
 
-        if token_budget_tracker.status() == crate::core::provider::BudgetStatus::Critical {
+        if state.token_budget_tracker.status() == crate::core::provider::BudgetStatus::Critical {
             // 不再硬终止，而是触发上下文压缩继续工作
-            info!("Token budget critical: {} in / {} out", total_usage.input_tokens, total_usage.output_tokens);
+            info!("Token budget critical: {} in / {} out", state.total_usage.input_tokens, state.total_usage.output_tokens);
         }
 
         // 从流式收集的结果构建 assistant message
@@ -619,7 +772,7 @@ pub async fn run_simple_loop<'a>(
         }
 
         let has_tool_use = !acc_tools.is_empty();
-        messages.push(assistant_msg);
+        state.add_message(assistant_msg);
 
         if !has_tool_use {
             // Rollout: 记录 LLM 回复
@@ -628,11 +781,11 @@ pub async fn run_simple_loop<'a>(
             }
 
             // Goal: 标记完成
-            if let (Some(ref mut gm), Some(ref gid)) = (goal_manager.as_deref_mut(), current_goal_id.as_ref()) {
+            if let (Some(ref mut gm), Some(gid)) = (goal_manager.as_deref_mut(), state.goal_id()) {
                 let _ = gm.update(gid, crate::core::goal::GoalStatus::Completed);
             }
 
-            return LoopOutcome::Completed { message: acc_text, usage: total_usage };
+            return LoopOutcome::Completed { message: acc_text, usage: state.usage_clone() };
         }
 
         // 处理工具调用 (含 StepObserver 观察 + 并行执行)
@@ -643,15 +796,15 @@ pub async fn run_simple_loop<'a>(
             // 并行执行只读工具
             let mut handles = Vec::new();
             for (tool_call_id, tool_name, input) in &acc_tools {
-                tool_call_count += 1;
+                state.increment_tool_call();
 
                 // 护栏检查
                 if let Some(ref gc) = guardrails {
                     let turn_ctx = crate::core::guardrail::TurnContext {
-                        turn_number,
-                        tool_call_count,
-                        total_input_tokens: total_usage.input_tokens,
-                        total_output_tokens: total_usage.output_tokens,
+                        turn_number: state.turn(),
+                        tool_call_count: state.tool_call_count,
+                        total_input_tokens: state.total_usage.input_tokens,
+                        total_output_tokens: state.total_usage.output_tokens,
                     };
                     match gc.check_tool(&turn_ctx, tool_name, input).await {
                         crate::core::guardrail::GuardResult::Allow => {},
@@ -661,7 +814,7 @@ pub async fn run_simple_loop<'a>(
                                 is_error: true,
                                 metadata: None,
                             };
-                            messages.push(Message {
+                            state.add_message(Message {
                                 role: Role::Tool,
                                 content: vec![ContentBlock::ToolResult {
                                     tool_name: tool_name.clone(),
@@ -695,6 +848,7 @@ pub async fn run_simple_loop<'a>(
                 let cache_ref = &cache;
                 let registry_ref = registry.clone();
                 let agent_id_ref = agent_id.clone();
+                let turn_for_task = state.turn();
 
                 handles.push(async move {
                     let start_time = std::time::Instant::now();
@@ -710,7 +864,7 @@ pub async fn run_simple_loop<'a>(
                             working_dir: std::env::current_dir()
                                 .map(|p| p.to_string_lossy().to_string())
                                 .unwrap_or_else(|_| ".".into()),
-                            turn_number,
+                            turn_number: turn_for_task,
                             agent_id: agent_id_ref.clone(),
                             registry: registry_ref,
                         };
@@ -736,7 +890,7 @@ pub async fn run_simple_loop<'a>(
             let mut early_stop_reason: Option<String> = None;
             for (tc_id, tn, mut result, elapsed) in results {
                 // StepObserver: 评估并行工具结果
-                let observe_action = observer.observe(&tn, &mut result);
+                let observe_action = state.observer_mut().observe(&tn, &mut result);
                 match observe_action {
                     ObserveAction::Continue => {}
                     ObserveAction::Retry => {
@@ -745,7 +899,7 @@ pub async fn run_simple_loop<'a>(
                     }
                     ObserveAction::Replan { hint } => {
                         info!("StepObserver replan from parallel tool '{}': {}", tn, hint);
-                        messages.push(Message {
+                        state.add_message(Message {
                             role: Role::System,
                             content: vec![ContentBlock::Text { text: hint }],
                             reasoning_content: None,
@@ -767,7 +921,7 @@ pub async fn run_simple_loop<'a>(
                         duration_ms: elapsed,
                     });
                 }
-                messages.push(Message {
+                state.add_message(Message {
                     role: Role::Tool,
                     content: vec![ContentBlock::ToolResult {
                         tool_name: tn,
@@ -783,23 +937,23 @@ pub async fn run_simple_loop<'a>(
             if let Some(reason) = early_stop_reason {
                 return LoopOutcome::Completed {
                     message: reason,
-                    usage: total_usage,
+                    usage: state.usage_clone(),
                 };
             }
-            cache_tracker.record(crate::core::cache::CacheBreakVector::ToolResultChange);
+            state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::ToolResultChange);
             debug!("CacheBreak: ToolResultChange (parallel batch)");
         } else {
             // 串行执行 (含 StepObserver)
         for (tool_call_id, tool_name, input) in &acc_tools {
-            tool_call_count += 1;
+            state.increment_tool_call();
 
             // 护栏检查
             if let Some(ref gc) = guardrails {
                 let turn_ctx = crate::core::guardrail::TurnContext {
-                    turn_number,
-                    tool_call_count,
-                    total_input_tokens: total_usage.input_tokens,
-                    total_output_tokens: total_usage.output_tokens,
+                    turn_number: state.turn(),
+                    tool_call_count: state.tool_call_count,
+                    total_input_tokens: state.total_usage.input_tokens,
+                    total_output_tokens: state.total_usage.output_tokens,
                 };
                 match gc.check_tool(&turn_ctx, tool_name, input).await {
                     crate::core::guardrail::GuardResult::Allow => {},
@@ -809,7 +963,7 @@ pub async fn run_simple_loop<'a>(
                             is_error: true,
                             metadata: None,
                         };
-                        messages.push(Message {
+                        state.add_message(Message {
                             role: Role::Tool,
                             content: vec![ContentBlock::ToolResult {
                                 tool_name: tool_name.clone(),
@@ -845,7 +999,7 @@ pub async fn run_simple_loop<'a>(
                                     is_error: true,
                                     metadata: None,
                                 };
-                                messages.push(Message {
+                                state.add_message(Message {
                                     role: Role::Tool,
                                     content: vec![ContentBlock::ToolResult {
                                         tool_name: tool_name.clone(),
@@ -874,7 +1028,7 @@ pub async fn run_simple_loop<'a>(
                             is_error: true,
                             metadata: None,
                         };
-                        messages.push(Message {
+                        state.add_message(Message {
                             role: Role::Tool,
                             content: vec![ContentBlock::ToolResult {
                                 tool_name: tool_name.clone(),
@@ -900,13 +1054,14 @@ pub async fn run_simple_loop<'a>(
                 });
             }
 
-            if tool_call_count > max_tool_calls {
+            if state.exceeds_max_tool_calls(max_tool_calls) {
                 return LoopOutcome::GuardrailDenied {
                     reason: format!("Max tool calls ({}) exceeded", max_tool_calls)
                 };
             }
 
             let start_time = std::time::Instant::now();
+            let current_turn = state.turn();
 
             // Check global cache
             let cache_key = crate::core::cache::ToolCacheKey {
@@ -922,7 +1077,7 @@ pub async fn run_simple_loop<'a>(
                     working_dir: std::env::current_dir()
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_else(|_| ".".into()),
-                    turn_number,
+                    turn_number: current_turn,
                     agent_id: agent_id.clone(),
                     registry: registry.clone(),
                 };
@@ -942,7 +1097,7 @@ pub async fn run_simple_loop<'a>(
             // StepObserver: 评估工具结果并决定下一步
             let mut early_stop_reason: Option<String> = None;
             loop {
-                let action = observer.observe(tool_name, &mut result);
+                let action = state.observer_mut().observe(tool_name, &mut result);
                 match action {
                     ObserveAction::Continue => break,
                     ObserveAction::Retry => {
@@ -952,7 +1107,7 @@ pub async fn run_simple_loop<'a>(
                             working_dir: std::env::current_dir()
                                 .map(|p| p.to_string_lossy().to_string())
                                 .unwrap_or_else(|_| ".".into()),
-                            turn_number,
+                            turn_number: current_turn,
                             agent_id: agent_id.clone(),
                             registry: registry.clone(),
                         };
@@ -970,7 +1125,7 @@ pub async fn run_simple_loop<'a>(
                     }
                     ObserveAction::Replan { hint } => {
                         info!("StepObserver replan: {}", hint);
-                        messages.push(Message {
+                        state.add_message(Message {
                             role: Role::System,
                             content: vec![ContentBlock::Text { text: hint }],
                             reasoning_content: None,
@@ -1005,8 +1160,8 @@ pub async fn run_simple_loop<'a>(
             }
 
             // Goal: 记录 token 使用
-            if let (Some(ref mut gm), Some(ref gid)) = (goal_manager.as_deref_mut(), current_goal_id.as_ref()) {
-                gm.record_tokens(gid, total_usage.input_tokens + total_usage.output_tokens);
+            if let (Some(ref mut gm), Some(gid)) = (goal_manager.as_deref_mut(), state.goal_id()) {
+                gm.record_tokens(gid, state.total_usage.input_tokens + state.total_usage.output_tokens);
             }
 
             // Hook: AfterTool
@@ -1025,7 +1180,7 @@ pub async fn run_simple_loop<'a>(
                 });
             }
 
-            messages.push(Message {
+            state.add_message(Message {
                 role: Role::Tool,
                 content: vec![ContentBlock::ToolResult {
                     tool_name: tool_name.clone(),
@@ -1036,39 +1191,24 @@ pub async fn run_simple_loop<'a>(
                 reasoning_content: None,
                 cache_breakpoint: false,
             });
-            cache_tracker.record(crate::core::cache::CacheBreakVector::ToolResultChange);
+            state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::ToolResultChange);
             debug!("CacheBreak: ToolResultChange ({})", tool_name);
 
             // EarlyStop: 提前终止整个循环
             if let Some(reason) = early_stop_reason {
                 return LoopOutcome::Completed {
                     message: reason,
-                    usage: total_usage,
+                    usage: state.usage_clone(),
                 };
             }
         }
         } // end else (串行执行)
 
-        // 上下文压缩: 消息过多时压缩 (600k 上下文，留足空间)
-        if messages.len() > 50 {
-            // 用 Auto 策略（LLM 摘要）替代 Snip，避免破坏 tool_use/tool_result 配对
-            let strategy = CompactionStrategy::Auto { summary_target_tokens: 2000 };
-            let result = compact_context(
-                &mut messages, &strategy,
-                Some(provider), model,
-            ).await;
-            if let Some(r) = result {
-                cache_tracker.record(crate::core::cache::CacheBreakVector::ContextCompaction);
-                info!(
-                    "Simple loop compacted: {} -> {} messages, freed {} tokens | CacheBreak: ContextCompaction",
-                    r.messages_before, r.messages_after, r.tokens_freed
-                );
-            } else {
-                // Auto 失败时用 Micro（保留最近 5 条，简单裁剪）
-                let strategy = CompactionStrategy::Micro { keep_recent: 5 };
-                let _ = compact_context(&mut messages, &strategy, None, model).await;
-            }
-        }
+        // 上下文压缩: 消息过多时压缩 — 使用 ContextManager
+        // 注: 此处使用直接字段借用，因为 ContextManager 同时需要 &mut cache_tracker 和 &mut messages，
+        //     通过字段直接借用 Rust 可自动 split-borrow (方法返回的借用则不会 split)
+        let mut ctx_mgr = ContextManager::new(Some(provider), model, &mut state.cache_tracker);
+        ctx_mgr.check_and_compact(&mut state.messages).await;
 
         tokio::task::yield_now().await;
     }

@@ -4,6 +4,7 @@ pub mod cache;
 pub mod context;
 pub mod audit;
 pub mod r#loop;
+pub mod tool_executor;
 pub mod providers;
 pub mod workspace;
 pub mod orionignore;
