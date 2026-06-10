@@ -1,20 +1,21 @@
-//! REPL 交互循环
+//! 持久化聊天循环
 //!
-//! 持久化 CLI: 启动 → 自动恢复 session → 循环对话 → 退出时保存
+//! 启动 → 自动恢复 session → 循环对话 → 退出时保存
 
-use crate::config::OrionConfig;
-use crate::session::manager::SessionManager;
-use crate::session::memory::{SessionMemory, extract_memories};
-use crate::cli::execute::execute_turn;
-use crate::core::providers::openai_compat::OpenAICompatProvider;
-use crate::core::provider::Provider;
-use crate::core::cache::GlobalCache;
-use crate::tools::registry::ToolRegistry;
-use crate::tools::agent_tool::SubAgentTool;
-use crate::tools::a2a_message::{SendMessageTool, ListPeersTool};
+use super::commands::SlashRegistry;
 use crate::audit::{AuditEvent as GlobalAuditEvent, AUDIT_LOGGER};
+use crate::cli::execute::execute_turn;
+use crate::config::OrionConfig;
+use crate::core::cache::GlobalCache;
+use crate::core::provider::Provider;
+use crate::core::providers::openai_compat::OpenAICompatProvider;
+use crate::session::manager::SessionManager;
+use crate::session::memory::{extract_memories, SessionMemory};
+use crate::tools::a2a_message::{ListPeersTool, SendMessageTool};
+use crate::tools::agent_tool::SubAgentTool;
+use crate::tools::registry::ToolRegistry;
 
-pub struct ReplState {
+pub struct ChatState {
     pub session_mgr: SessionManager,
     pub current_session: String,
     pub provider: Box<dyn Provider>,
@@ -85,7 +86,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
 
     let memory = SessionMemory::load();
 
-    let mut state = ReplState {
+    let mut state = ChatState {
         session_mgr,
         current_session: session_id,
         provider,
@@ -119,13 +120,16 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
                 session_id: state.current_session.clone(),
                 model: state.model.clone(),
             },
-            "repl",
+            "chat",
             &state.current_session,
         );
     }
     let session_start_time = std::time::Instant::now();
 
-    // REPL 循环
+    // 共享的 slash 命令注册表
+    let slash_registry = SlashRegistry::default();
+
+    // chat 循环
     loop {
         eprint!("{}", config.cli.prompt);
         use std::io::Write;
@@ -140,7 +144,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
 
         // 命令路由
         if input.starts_with('/') {
-            match handle_command(input, &mut state, &config).await {
+            match handle_command(input, &mut state, &config, &slash_registry).await {
                 CmdResult::Continue => continue,
                 CmdResult::Exit => break,
                 CmdResult::Error(msg) => { eprintln!("❌ {}", msg); continue; }
@@ -189,7 +193,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
                 session_id: state.current_session.clone(),
                 duration_ms,
             },
-            "repl",
+            "chat",
             &state.current_session,
         );
         logger.flush();
@@ -205,7 +209,12 @@ enum CmdResult {
     Error(String),
 }
 
-async fn handle_command(input: &str, state: &mut ReplState, _config: &OrionConfig) -> CmdResult {
+async fn handle_command(
+    input: &str,
+    state: &mut ChatState,
+    _config: &OrionConfig,
+    slash_registry: &SlashRegistry,
+) -> CmdResult {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
     let cmd = parts[0];
     let arg = parts.get(1).map(|s| s.trim());
@@ -428,9 +437,8 @@ async fn handle_command(input: &str, state: &mut ReplState, _config: &OrionConfi
         }
         "/exit" | "/quit" => return CmdResult::Exit,
         _ => {
-            // 尝试通用斜杠命令注册表
-            let registry = crate::cli::commands::SlashRegistry::default();
-            match registry.handle(input) {
+            // 通用斜杠命令注册表 (chat/commands.rs 处理 /clear, /status, /history, /memory, /sessions, /delete, /restore, /trash)
+            match slash_registry.handle(input) {
                 Some(response) => {
                     if !response.is_empty() {
                         eprintln!("{}", response);

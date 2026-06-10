@@ -114,7 +114,7 @@ src/
 │   ├── files.rs        # Directory structure management (soft delete/restore)
 │   └── rollout.rs      # JSONL event stream (immutable audit)
 ├── api/                # REST API (feature-gated)
-├── cli/                # REPL + command handling
+├── cli/                # Chat loop + command handling (chat/ internal split)
 ├── gateway/            # Entry routing
 ├── config.rs           # YAML config + environment variable substitution
 ├── model/              # Model registry

@@ -1,3 +1,2 @@
-pub mod repl;
+pub mod chat;
 pub mod execute;
-pub mod commands;

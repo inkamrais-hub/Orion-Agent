@@ -1,7 +1,7 @@
 //! Session 内斜杠命令系统
 //!
-//! 注册由 repl.rs fallback 路径处理的命令 (/clear, /status, /history, /memory 等)。
-//! /help, /new, /model, /resume, /think 等已在 repl.rs handle_command() 中直接实现。
+//! 注册由 `chat::loop` fallback 路径处理的命令 (/clear, /status, /history, /memory 等)。
+//! /help, /new, /model, /resume, /think 等已在 `chat::loop::handle_command()` 中直接实现。
 
 use std::collections::HashMap;
 
@@ -72,7 +72,7 @@ impl SlashRegistry {
             }),
         });
 
-        // /history - 显示历史（占位，repl.rs 尚未实现真实版本，由 SlashRegistry fallback 处理）
+        // /history - 显示历史（占位，chat/loop 尚未实现真实版本，由 SlashRegistry fallback 处理）
         self.register(SlashCommand {
             name: "history".into(),
             description: "显示对话历史".into(),
@@ -83,7 +83,7 @@ impl SlashRegistry {
             }),
         });
 
-        // /memory - 查看记忆（占位，repl.rs 尚未实现真实版本，由 SlashRegistry fallback 处理）
+        // /memory - 查看记忆（占位，chat/loop 尚未实现真实版本，由 SlashRegistry fallback 处理）
         self.register(SlashCommand {
             name: "memory".into(),
             description: "查看记忆".into(),
@@ -119,7 +119,7 @@ impl SlashRegistry {
                     .or_else(|_| std::env::var("USERPROFILE"))
                     .unwrap_or_else(|_| ".".into());
                 let db_path = std::path::PathBuf::from(home).join(".config").join("orion").join("sessions.db");
-                
+
                 if let Ok(store) = crate::session::store::SessionStore::new(&db_path) {
                     if let Ok(sessions) = store.list_sessions(count) {
                         if sessions.is_empty() {
@@ -150,19 +150,19 @@ impl SlashRegistry {
                     return "用法: /delete <session_id>\n使用 /sessions 查看可用会话".into();
                 }
                 let session_id = args[0];
-                
+
                 // 验证 Session ID 格式
                 if !session_id.starts_with("session_") {
                     return "无效的 Session ID (必须以 session_ 开头)".into();
                 }
-                
+
                 let fm = crate::session::files::SessionFileManager::new();
-                
+
                 // 检查是否存在
                 if !fm.session_exists(session_id) {
                     return format!("Session 不存在: {}", session_id);
                 }
-                
+
                 // 软删除
                 match fm.soft_delete(session_id) {
                     Ok(_) => {
@@ -187,7 +187,7 @@ impl SlashRegistry {
                 }
                 let session_id = args[0];
                 let fm = crate::session::files::SessionFileManager::new();
-                
+
                 match fm.restore(session_id) {
                     Ok(_) => {
                         format!("✓ 已恢复 Session: {}", session_id)

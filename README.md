@@ -114,7 +114,7 @@ src/
 │   ├── files.rs        # 目录结构管理（软删除/恢复）
 │   └── rollout.rs      # JSONL 事件流（不可变审计）
 ├── api/                # REST API（feature-gated）
-├── cli/                # REPL + 命令处理
+├── cli/                # 聊天循环 + 命令处理 (chat/ 内部细分)
 ├── gateway/            # 入口路由
 ├── config.rs           # YAML 配置 + 环境变量替换
 ├── model/              # 模型注册表
