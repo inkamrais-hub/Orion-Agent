@@ -194,6 +194,7 @@ pub async fn execute_turn(
             prompt_cache: false,
             max_output_tokens,
         },
+        exec_mode: crate::core::exec_mode::ExecMode::default(),
     };
     let outcome = run_simple_loop(
         provider, tools, cache, &loop_config, user_input,

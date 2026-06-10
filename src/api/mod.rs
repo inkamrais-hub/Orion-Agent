@@ -12,11 +12,13 @@
 //! - POST   /api/sessions/{id}/rollback - Session 回滚
 
 use axum::{
-    extract::{Path, State},
+    body::Body,
+    extract::{Path, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
     response::{
         sse::{Event, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -35,6 +37,68 @@ use crate::core::providers::openai_compat::OpenAICompatProvider;
 use crate::tools::registry::ToolRegistry;
 
 // ============================================================
+//  认证配置
+// ============================================================
+
+/// API 认证配置
+#[derive(Debug, Clone)]
+pub struct AuthConfig {
+    /// 是否启用认证 (默认 false, 开发模式)
+    pub enabled: bool,
+    /// API Key (环境变量 ORION_API_KEY 或配置文件)
+    pub api_key: Option<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: std::env::var("ORION_API_KEY").ok(),
+        }
+    }
+}
+
+// ============================================================
+//  限流器
+// ============================================================
+
+/// 简易内存限流器 (按 IP)
+pub struct RateLimiter {
+    requests: dashmap::DashMap<String, (std::time::Instant, std::sync::atomic::AtomicU64)>,
+    max_per_minute: u64,
+}
+
+impl RateLimiter {
+    /// 创建限流器，指定每分钟最大请求数
+    pub fn new(max_per_minute: u64) -> Self {
+        Self {
+            requests: dashmap::DashMap::new(),
+            max_per_minute,
+        }
+    }
+
+    /// 检查是否允许请求通过 (返回 true 表示允许)
+    pub fn check(&self, key: &str) -> bool {
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(60);
+
+        let mut entry = self.requests.entry(key.to_string()).or_insert_with(|| {
+            (now, std::sync::atomic::AtomicU64::new(0))
+        });
+
+        let (window_start, counter) = entry.value();
+        if now.duration_since(*window_start) > window {
+            // Reset window
+            *entry = (now, std::sync::atomic::AtomicU64::new(1));
+            true
+        } else {
+            let count = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            count < self.max_per_minute
+        }
+    }
+}
+
+// ============================================================
 //  共享状态
 // ============================================================
 
@@ -42,13 +106,15 @@ use crate::tools::registry::ToolRegistry;
 pub struct ApiState {
     pub store: Arc<UnifiedStore>,
     pub config: OrionConfig,
+    pub auth_config: AuthConfig,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 // ============================================================
 //  Router
 // ============================================================
 
-/// 创建 API 路由器（所有端点 + 共享状态）
+/// 创建 API 路由器（所有端点 + 共享状态 + 中间件）
 pub fn create_router(state: Arc<ApiState>) -> Router {
     let ui_path = if std::path::Path::new("../orion-ui").exists() {
         "../orion-ui"
@@ -58,6 +124,9 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         "../orion-ui"
     };
 
+    let auth_config = Arc::new(state.auth_config.clone());
+    let rate_limiter = state.rate_limiter.clone();
+
     Router::new()
         .route("/api/health", get(health))
         .route("/api/agents", get(list_agents).post(create_agent))
@@ -66,6 +135,14 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/api/chat", post(chat))
         .route("/api/sessions/{id}/rollback", post(rollback_session))
         .fallback_service(tower_http::services::ServeDir::new(ui_path))
+        .layer(middleware::from_fn(move |req, next| {
+            let auth = Arc::clone(&auth_config);
+            async move { auth_middleware(auth, req, next).await }
+        }))
+        .layer(middleware::from_fn(move |req, next| {
+            let limiter = Arc::clone(&rate_limiter);
+            async move { rate_limit_middleware(limiter, req, next).await }
+        }))
         .with_state(state)
 }
 
@@ -359,6 +436,77 @@ async fn rollback_session(
     Ok(Json(serde_json::json!({
         "restored_files": restored_files,
     })))
+}
+
+// ============================================================
+//  中间件
+// ============================================================
+
+/// API Key 认证中间件
+///
+/// 检查 `X-API-Key` 或 `Authorization: Bearer` 头中的 API Key。
+/// 当 `AuthConfig::enabled` 为 false 或未配置 API Key 时，直接放行。
+async fn auth_middleware(
+    auth_config: Arc<AuthConfig>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !auth_config.enabled {
+        return next.run(req).await;
+    }
+
+    let expected_key = match &auth_config.api_key {
+        Some(key) if !key.is_empty() => key.clone(),
+        _ => return next.run(req).await, // No key configured = open access
+    };
+
+    // Check X-API-Key header
+    if let Some(key) = req.headers().get("X-API-Key").and_then(|v| v.to_str().ok()) {
+        if key == expected_key {
+            return next.run(req).await;
+        }
+    }
+
+    // Check Authorization: Bearer header
+    if let Some(auth) = req.headers().get("Authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(token) = auth.strip_prefix("Bearer ") {
+            if token == expected_key {
+                return next.run(req).await;
+            }
+        }
+    }
+
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .body(Body::from("Unauthorized"))
+        .unwrap()
+}
+
+/// 简易 IP 限流中间件
+///
+/// 基于 `X-Forwarded-For` / `X-Real-IP` 头识别客户端 IP，
+/// 使用内存滑窗限流。未配置限流器时直接放行。
+async fn rate_limit_middleware(
+    rate_limiter: Arc<RateLimiter>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let ip = req
+        .headers()
+        .get("X-Forwarded-For")
+        .or_else(|| req.headers().get("X-Real-IP"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+
+    if rate_limiter.check(&ip) {
+        next.run(req).await
+    } else {
+        Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .body(Body::from("Rate limit exceeded"))
+            .unwrap()
+    }
 }
 
 // ============================================================

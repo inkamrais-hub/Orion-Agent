@@ -78,6 +78,8 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
                 let api_state = std::sync::Arc::new(crate::api::ApiState {
                     store,
                     config: ctx.config,
+                    auth_config: crate::api::AuthConfig::default(),
+                    rate_limiter: std::sync::Arc::new(crate::api::RateLimiter::new(120)),
                 });
                 let app = crate::api::create_router(api_state);
                 let addr = format!("0.0.0.0:{}", port);

@@ -96,6 +96,7 @@ impl Tool for SubAgentTool {
             token_budget: 64_000, agent_id: "sub_agent".into(),
             session_id: uuid::Uuid::new_v4().to_string(),
             model_caps: crate::core::r#loop::ModelCaps::default(),
+            exec_mode: crate::core::exec_mode::ExecMode::default(),
         };
         let result = crate::core::r#loop::run_simple_loop(
             &*provider, &tools, &cache, &loop_config, &task,

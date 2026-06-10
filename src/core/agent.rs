@@ -213,6 +213,8 @@ impl AgentBuilder {
             Arc::new(self.tools)
         };
 
+        let registry = self.registry.unwrap_or_else(|| crate::agent::registry::AgentRegistry::new());
+
         Ok(Agent {
             config: self.config,
             provider,
@@ -220,7 +222,7 @@ impl AgentBuilder {
             cache: self.cache.unwrap_or_else(|| GlobalCache::new(1024, 300, 64)),
             hook_engine: self.hook_engine.map(|e| Arc::new(tokio::sync::Mutex::new(e))),
             exec_policy: self.exec_policy.map(Arc::new),
-            registry: self.registry,
+            registry: Some(registry),
         })
     }
 }
@@ -275,6 +277,7 @@ impl Agent {
                 prompt_cache: true,
                 max_output_tokens: resolve_max_output_tokens(&self.config.reasoning_effort),
             },
+            exec_mode: crate::core::exec_mode::ExecMode::default(),
         }
     }
 
@@ -358,6 +361,7 @@ impl Agent {
                     prompt_cache: true,
                     max_output_tokens: resolve_max_output_tokens(&reasoning_effort),
                 },
+                exec_mode: crate::core::exec_mode::ExecMode::default(),
             };
 
             let event_tx = tx.clone();

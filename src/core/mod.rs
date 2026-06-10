@@ -14,6 +14,7 @@ pub mod permission_broker;
 pub mod goal;
 pub mod agent;
 pub mod prompt;
+pub mod exec_mode;
 
 /// Provider 标识
 pub type ProviderId = String;

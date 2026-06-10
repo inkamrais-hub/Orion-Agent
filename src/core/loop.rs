@@ -400,6 +400,8 @@ pub struct SimpleLoopConfig {
     pub agent_id: String,
     pub session_id: String,
     pub model_caps: ModelCaps,
+    /// 执行模式
+    pub exec_mode: crate::core::exec_mode::ExecMode,
 }
 
 impl Default for SimpleLoopConfig {
@@ -413,6 +415,7 @@ impl Default for SimpleLoopConfig {
             agent_id: "main".into(),
             session_id: uuid::Uuid::new_v4().to_string(),
             model_caps: ModelCaps::default(),
+            exec_mode: crate::core::exec_mode::ExecMode::default(),
         }
     }
 }

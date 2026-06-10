@@ -7,6 +7,7 @@
 //! - 审计报告
 //! - 快照接口预留
 
+pub mod backend;
 pub mod manager;
 pub mod memory;
 pub mod store;
