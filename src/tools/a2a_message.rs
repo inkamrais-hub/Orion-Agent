@@ -87,10 +87,10 @@ impl Tool for SendMessageTool {
 
         // 通过 registry 发送 (如果有)
         if let Some(ref registry) = ctx.registry {
-            let a2a = A2AMessage::RequestInfo {
-                from: ctx.agent_id.clone(),
-                query: message.to_string(),
-            };
+            let a2a = A2AMessage::new_request_info(
+                ctx.agent_id.clone(),
+                message.to_string(),
+            );
             match registry.send_a2a(&to.to_string(), a2a).await {
                 Ok(_) => Ok(ToolResult {
                     content: format!("Message sent to '{}'. The agent will process it when available.", to),

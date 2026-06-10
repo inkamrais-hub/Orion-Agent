@@ -11,6 +11,11 @@ use crate::core::agent::Agent;
 use crate::core::provider::Provider;
 use crate::tools::registry::ToolRegistry;
 
+/// 粗略估算文本 token 数量（约每 4 字节 = 1 token）
+fn estimate_text_tokens(text: &str) -> u64 {
+    (text.len() as u64) / 4
+}
+
 /// MapReduce 编排器
 pub struct MapReduceOrchestrator {
     provider: Arc<dyn Provider>,
@@ -140,18 +145,25 @@ impl MapReduceOrchestrator {
 
                     match agent {
                         Ok(agent) => match agent.chat(&task.description).await {
-                            Ok(output) => SubTaskResult {
-                                task_id: task.id,
-                                success: true,
-                                output,
-                                tokens_used: 0,
-                            },
-                            Err(e) => SubTaskResult {
-                                task_id: task.id,
-                                success: false,
-                                output: format!("Error: {}", e),
-                                tokens_used: 0,
-                            },
+                            Ok(output) => {
+                                let tokens = estimate_text_tokens(&task.description)
+                                    + estimate_text_tokens(&output);
+                                SubTaskResult {
+                                    task_id: task.id,
+                                    success: true,
+                                    output,
+                                    tokens_used: tokens,
+                                }
+                            }
+                            Err(e) => {
+                                let tokens = estimate_text_tokens(&task.description);
+                                SubTaskResult {
+                                    task_id: task.id,
+                                    success: false,
+                                    output: format!("Error: {}", e),
+                                    tokens_used: tokens,
+                                }
+                            }
                         },
                         Err(e) => SubTaskResult {
                             task_id: task.id,
@@ -224,8 +236,13 @@ impl MapReduceOrchestrator {
 
         let output = agent.chat(&prompt).await?;
 
+        // 统计 Map 阶段所有子任务的 token 用量，加上 Reduce 阶段的估算
+        let map_tokens: u64 = results.iter().map(|r| r.tokens_used).sum();
+        let reduce_tokens = estimate_text_tokens(&prompt) + estimate_text_tokens(&output);
+        let total_tokens = map_tokens + reduce_tokens;
+
         // 尝试解析 JSON，失败则构造 fallback 摘要
-        let summary =
+        let mut summary =
             serde_json::from_str::<SwarmSummary>(&output).unwrap_or_else(|_| SwarmSummary {
                 completed_tasks: results
                     .iter()
@@ -241,6 +258,8 @@ impl MapReduceOrchestrator {
                 total_tokens: 0,
                 summary: output,
             });
+
+        summary.total_tokens = total_tokens;
 
         Ok(summary)
     }

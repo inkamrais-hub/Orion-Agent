@@ -1,3 +1,8 @@
+// Internal: suppress deprecation warnings within this module.
+// The deprecated items here reference each other; external consumers
+// will still see the deprecation notices.
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -18,7 +23,12 @@ pub struct LaneToken {
     pub agent_id: AgentId,
 }
 
-/// Lane 管理器
+/// Lane manager
+///
+/// `LaneManager` is **not** currently wired into the execution pipeline.
+/// It is retained for future multi-agent concurrency work where parallel
+/// agents need serialised access to shared resources per (session, lane) pair.
+#[deprecated(note = "LaneManager is not yet integrated into the execution pipeline. Retained for future multi-agent concurrency.")]
 pub struct LaneManager {
     /// 活跃的 lane 令牌
     active: Arc<Mutex<HashMap<(SessionId, LaneId), AgentId>>>,
@@ -26,6 +36,9 @@ pub struct LaneManager {
     pending: Arc<Mutex<HashMap<(SessionId, LaneId), Vec<AgentId>>>>,
 }
 
+// Suppress deprecation warnings inside this file's own impl block;
+// the methods remain available for future integration.
+#[allow(deprecated)]
 impl LaneManager {
     pub fn new() -> Self {
         Self {

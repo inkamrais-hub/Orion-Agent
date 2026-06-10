@@ -13,6 +13,8 @@ use std::sync::Arc;
 pub struct CoordinatorConfig {
     pub worker_model: Option<String>,
     pub max_rounds: usize,
+    /// 主执行循环最大迭代次数，防止死循环（默认 20）
+    pub max_iterations: usize,
 }
 
 impl Default for CoordinatorConfig {
@@ -20,6 +22,7 @@ impl Default for CoordinatorConfig {
         Self {
             worker_model: None,
             max_rounds: 5,
+            max_iterations: 20,
         }
     }
 }
@@ -54,7 +57,7 @@ impl Coordinator {
         tracing::info!(goal = %plan.goal, tasks = plan.tasks.len(), "Task plan created");
 
         // 2. 循环执行可执行任务
-        let max_iterations = 20; // 防止死循环
+        let max_iterations = self.config.max_iterations; // 防止死循环
         let mut iterations = 0;
         while !plan.is_complete() && iterations < max_iterations {
             iterations += 1;
@@ -75,8 +78,22 @@ impl Coordinator {
                     plan.mark_completed(&subtask.id, result);
                 }
                 Err(e) => {
-                    tracing::warn!(task_id = %subtask.id, error = %e, "Subtask failed");
-                    plan.mark_failed(&subtask.id, e.to_string());
+                    // 首次失败：重试一次
+                    tracing::warn!(task_id = %subtask.id, error = %e, "Subtask failed, retrying once");
+
+                    let retry_worker = self.create_worker(&subtask.id).await;
+                    let retry_context = plan.completed_summary();
+
+                    match retry_worker.execute(&subtask.description, &retry_context).await {
+                        Ok(result) => {
+                            tracing::info!(task_id = %subtask.id, "Subtask succeeded on retry");
+                            plan.mark_completed(&subtask.id, result);
+                        }
+                        Err(retry_err) => {
+                            tracing::warn!(task_id = %subtask.id, error = %retry_err, "Subtask failed after retry");
+                            plan.mark_failed(&subtask.id, retry_err.to_string());
+                        }
+                    }
                 }
             }
         }

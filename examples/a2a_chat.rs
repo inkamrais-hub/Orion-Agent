@@ -118,10 +118,10 @@ async fn main() -> orion_agent::Result<()> {
         for msg in &bob_inbox {
             if let Some(a2a) = A2AMessage::from_json(&msg.content) {
                 match a2a {
-                    A2AMessage::ShareResult { from, task_id, content } => {
+                    A2AMessage::ShareResult { from, task_id, content, .. } => {
                         parts.push(format!("[A2A from {}] Task '{}' result: {}", from, task_id, content));
                     }
-                    A2AMessage::RequestInfo { from, query } => {
+                    A2AMessage::RequestInfo { from, query, .. } => {
                         parts.push(format!("[A2A from {}] Question: {}", from, query));
                     }
                     _ => {}

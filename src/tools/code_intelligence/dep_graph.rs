@@ -124,7 +124,7 @@ pub fn find_impact(graph: &FileDepGraph, file: &str) -> Vec<String> {
 
 // ── Cargo.toml 解析 ──────────────────────────────────────
 
-fn parse_cargo_deps(path: &Path, graph: &DepGraph) {
+fn parse_cargo_deps(path: &Path, graph: &mut DepGraph) {
     // 简化版: 用字符串解析而非完整 TOML 解析
     let content = std::fs::read_to_string(path).unwrap_or_default();
     let source = path.to_string_lossy().to_string();
@@ -135,7 +135,7 @@ fn parse_cargo_deps(path: &Path, graph: &DepGraph) {
     parse_dep_section(&content, "dev-dependencies", &source, true, graph);
 }
 
-fn parse_dep_section(content: &str, section: &str, source: &str, dev_only: bool, graph: &DepGraph) {
+fn parse_dep_section(content: &str, section: &str, source: &str, dev_only: bool, graph: &mut DepGraph) {
     // 找到 section 的开始
     let section_header = format!("[{}]", section);
     let section_start = content.find(&section_header);
@@ -170,24 +170,19 @@ fn parse_dep_section(content: &str, section: &str, source: &str, dev_only: bool,
                 "*".into()
             };
 
-            // 安全地添加到 graph (需要可变引用)
-            // 这里用 unsafe 简化，实际应该用 RefCell
-            unsafe {
-                let graph_ptr = graph as *const DepGraph as *mut DepGraph;
-                (*graph_ptr).nodes.push(DepNode {
-                    name: name.clone(),
-                    version: Some(version),
-                    dev_only,
-                    source: source.to_string(),
-                });
-            }
+            graph.nodes.push(DepNode {
+                name: name.clone(),
+                version: Some(version),
+                dev_only,
+                source: source.to_string(),
+            });
         }
     }
 }
 
 // ── package.json 解析 ────────────────────────────────────
 
-fn parse_package_json_deps(path: &Path, graph: &DepGraph) {
+fn parse_package_json_deps(path: &Path, graph: &mut DepGraph) {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     let source = path.to_string_lossy().to_string();
 
@@ -196,30 +191,24 @@ fn parse_package_json_deps(path: &Path, graph: &DepGraph) {
     // dependencies
     if let Some(deps) = json.get("dependencies").and_then(|d| d.as_object()) {
         for (name, version) in deps {
-            unsafe {
-                let graph_ptr = graph as *const DepGraph as *mut DepGraph;
-                (*graph_ptr).nodes.push(DepNode {
-                    name: name.clone(),
-                    version: version.as_str().map(|s| s.to_string()),
-                    dev_only: false,
-                    source: source.clone(),
-                });
-            }
+            graph.nodes.push(DepNode {
+                name: name.clone(),
+                version: version.as_str().map(|s| s.to_string()),
+                dev_only: false,
+                source: source.clone(),
+            });
         }
     }
 
     // devDependencies
     if let Some(deps) = json.get("devDependencies").and_then(|d| d.as_object()) {
         for (name, version) in deps {
-            unsafe {
-                let graph_ptr = graph as *const DepGraph as *mut DepGraph;
-                (*graph_ptr).nodes.push(DepNode {
-                    name: name.clone(),
-                    version: version.as_str().map(|s| s.to_string()),
-                    dev_only: true,
-                    source: source.clone(),
-                });
-            }
+            graph.nodes.push(DepNode {
+                name: name.clone(),
+                version: version.as_str().map(|s| s.to_string()),
+                dev_only: true,
+                source: source.clone(),
+            });
         }
     }
 }

@@ -4,6 +4,31 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 去除 LLM 输出中的 Markdown 代码围栏（```json ... ``` 或 ``` ... ```），
+/// 返回内部的纯文本内容。若未检测到围栏则原样返回。
+fn strip_markdown_fences(input: &str) -> String {
+    let trimmed = input.trim();
+
+    // 检测以 ```json 或 ``` 开头
+    if trimmed.starts_with("```") {
+        // 去掉第一行（```json 或 ```）
+        let after_first = trimmed.find('\n')
+            .map(|i| &trimmed[i + 1..])
+            .unwrap_or(trimmed);
+
+        // 去掉末尾的 ```
+        let result = if let Some(pos) = after_first.rfind("```") {
+            &after_first[..pos]
+        } else {
+            after_first
+        };
+
+        return result.trim().to_string();
+    }
+
+    trimmed.to_string()
+}
+
 /// 子任务
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubTask {
@@ -49,7 +74,8 @@ pub struct TaskPlan {
 impl TaskPlan {
     /// 从 LLM JSON 响应解析任务计划
     pub fn from_json(json_str: &str) -> crate::Result<Self> {
-        let raw: serde_json::Value = match serde_json::from_str(json_str) {
+        let json_str = strip_markdown_fences(json_str);
+        let raw: serde_json::Value = match serde_json::from_str(&json_str) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Plan JSON parse failed: {}, creating fallback single task", e);

@@ -1,3 +1,8 @@
+// Internal: suppress deprecation warnings within this module.
+// The deprecated items here reference each other; external consumers
+// will still see the deprecation notices.
+#![allow(deprecated)]
+
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -13,7 +18,10 @@ use crate::tools::registry::ToolRegistry;
 //  积木: Agent Runtime (Agent 执行体)
 // ============================================================
 
-/// Agent 配置
+/// Agent configuration
+///
+/// Tightly coupled to [`AgentRuntime`]; retained for API compatibility.
+#[deprecated(note = "AgentConfig is coupled to the deprecated AgentRuntime. Use core::agent::Agent instead.")]
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub agent_id: AgentId,
@@ -24,7 +32,12 @@ pub struct AgentConfig {
     pub max_tokens_per_turn: u64,
 }
 
-/// Agent 运行时
+/// Agent runtime
+///
+/// This struct is **not** instantiated in the main execution flow.
+/// The primary agent loop lives in `core::agent::Agent`; `AgentRuntime`
+/// is retained only for external API consumers and integration tests.
+#[deprecated(note = "Use core::agent::Agent instead. AgentRuntime is retained for API compatibility but is not used in the main execution loop.")]
 pub struct AgentRuntime {
     pub config: AgentConfig,
     pub provider: Box<dyn Provider>,
@@ -38,6 +51,9 @@ pub struct AgentRuntime {
     pub registry: Option<std::sync::Arc<crate::agent::registry::AgentRegistry>>,
 }
 
+// Suppress deprecation warnings inside this file's own impl blocks;
+// the methods remain available for external consumers.
+#[allow(deprecated)]
 impl AgentRuntime {
     pub fn new(
         config: AgentConfig,

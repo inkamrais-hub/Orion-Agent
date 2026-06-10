@@ -821,6 +821,34 @@ pub async fn run_simple_loop<'a>(
                     });
                 }
 
+                // ExecPolicy: 命令安全检查 (defense-in-depth: 并行路径虽仅含只读工具,
+                // 仍对 bash 命令执行策略校验, 防止未来 readonly 判定逻辑变更引入风险)
+                if let Some(policy) = exec_policy {
+                    if tool_name == "bash" {
+                        if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                            match policy.check(cmd) {
+                                PolicyDecision::Allow => {}
+                                PolicyDecision::Forbid => {
+                                    state.add_message(Message {
+                                        role: Role::Tool,
+                                        content: vec![ContentBlock::ToolResult {
+                                            tool_name: tool_name.clone(),
+                                            content: format!(
+                                                "🚫 命令被安全策略拦截: {}", cmd
+                                            ),
+                                            is_error: true,
+                                            tool_call_id: tool_call_id.clone(),
+                                        }],
+                                        reasoning_content: None,
+                                        cache_breakpoint: false,
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let tc_id = tool_call_id.clone();
                 let tn = tool_name.clone();
                 let inp = input.clone();

@@ -272,7 +272,7 @@ impl Agent {
             session_id: session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             model_caps: ModelCaps {
                 thinking: self.config.thinking,
-                prompt_cache: false,
+                prompt_cache: true,
                 max_output_tokens: resolve_max_output_tokens(&self.config.reasoning_effort),
             },
         }
@@ -355,7 +355,7 @@ impl Agent {
                 session_id,
                 model_caps: ModelCaps {
                     thinking,
-                    prompt_cache: false,
+                    prompt_cache: true,
                     max_output_tokens: resolve_max_output_tokens(&reasoning_effort),
                 },
             };

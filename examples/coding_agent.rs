@@ -63,6 +63,7 @@ async fn main() -> orion_agent::Result<()> {
     let coord_config = CoordinatorConfig {
         worker_model: config.orchestrator.worker_model.clone(),
         max_rounds: config.orchestrator.max_rounds,
+        ..Default::default()
     };
     let report_cache = cache.clone();
     let registry = AgentRegistry::new();
