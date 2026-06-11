@@ -181,8 +181,10 @@ impl TokenBudget {
     }
 
     pub fn record_usage(&mut self, usage: &UsageInfo) {
-        // input_tokens 已经是总输入，不重复加 cache_creation_tokens
-        self.used_input += usage.input_tokens;
+        // input_tokens = 当前请求的完整 prompt 大小 (已包含所有历史消息)
+        // 用 = 覆盖而非 += 累加，避免跨轮次重复计算导致 budget 误判
+        self.used_input = usage.input_tokens;
+        // output_tokens 是每次 API 调用的新产出，累加正确
         self.used_output += usage.output_tokens;
     }
 
@@ -262,7 +264,7 @@ mod budget_tests {
     }
 
     #[test]
-    fn test_record_usage_accumulates() {
+    fn test_record_usage_input_overwrites_output_accumulates() {
         let mut budget = TokenBudget::new(1000, 500);
         let usage1 = UsageInfo {
             input_tokens: 100,
@@ -278,7 +280,41 @@ mod budget_tests {
         };
         budget.record_usage(&usage1);
         budget.record_usage(&usage2);
-        assert_eq!(budget.used_input, 300);
+        // input: 覆盖为最新值 200 (不是累加 300)
+        assert_eq!(budget.used_input, 200);
+        // output: 累加 50 + 100 = 150
         assert_eq!(budget.used_output, 150);
+    }
+
+    #[test]
+    fn test_multi_turn_budget_no_false_critical() {
+        // 模拟真实场景: 128K context window, 10 轮工具调用
+        let mut budget = TokenBudget::new(128_000, 128_000);
+
+        // 每轮 API 返回的 input_tokens 是当前完整 prompt 大小 (递增)
+        let per_turn_inputs = [5000, 8000, 12000, 18000, 25000, 32000, 40000, 48000, 55000, 60000];
+        let per_turn_outputs = [500u64; 10];
+
+        for (i, (&input, &output)) in per_turn_inputs.iter().zip(per_turn_outputs.iter()).enumerate() {
+            budget.record_usage(&UsageInfo {
+                input_tokens: input,
+                output_tokens: output,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+            });
+            // 每轮的 input_usage 应该 = 当前轮的 prompt 大小 / context window
+            let expected = input as f64 / 128_000.0;
+            assert!(
+                (budget.input_usage() - expected).abs() < 0.001,
+                "Turn {}: expected input_usage={}, got={}",
+                i, expected, budget.input_usage()
+            );
+        }
+
+        // 最终: input = 60000 / 128000 = 46.9% → Ok
+        assert_eq!(budget.status(), BudgetStatus::Ok);
+        assert!((budget.input_usage() - 60000.0 / 128000.0).abs() < 0.001);
+        // output 累积: 500 * 10 = 5000
+        assert_eq!(budget.used_output, 5000);
     }
 }
