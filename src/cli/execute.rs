@@ -46,11 +46,11 @@ pub fn build_system_prompt_static() -> String {
     prompt.push_str("- When referencing files, use clickable links: `filename` (path)\n");
     prompt.push_str("- Keep responses concise. One sentence is better than three.\n\n");
 
-    // ── 工具类别 ──
-    prompt.push_str("[Tool Categories]\n");
-    prompt.push_str("You have access to these tool categories. Call tools directly by name.\n\n");
-    let categories = crate::tools::category::create_default_categories();
-    prompt.push_str(&categories.brief_list());
+    // ── 工具聚类 ──
+    prompt.push_str("[Tool Clusters]\n");
+    prompt.push_str("You have access to these tool clusters. Call tools directly by name.\n\n");
+    let clusters = crate::tools::category::create_default_clusters();
+    prompt.push_str(&clusters.sys_prompt_all());
     prompt.push('\n');
 
     // ── 动态上下文 (CWD, OS, Shell) ──

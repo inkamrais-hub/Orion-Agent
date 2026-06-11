@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orion Agent Framework — TUI Demo</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone@7.26.0/babel.min.js"></script>
+<script crossorigin src="https://unpkg.com/recharts@2.15.3/umd/Recharts.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body, #root { height: 100%; overflow: hidden; }
+  body { background: #0a0e1a; color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  input::placeholder { color: #64748b; }
+  input:focus { border-color: #6366f1 !important; }
+  button:hover { filter: brightness(1.1); }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(99,102,241,0.4); } 50% { box-shadow: 0 0 0 6px rgba(99,102,241,0); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+const { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } = Recharts;
+
+// ==================== Constants ====================
+const C = {
+  bg: "#0a0e1a", surface: "#111827", hover: "#1a2236",
+  border: "#1e293b", borderLight: "#334155",
+  primary: "#6366f1", primaryLight: "#818cf8",
+  accent: "#f59e0b", green: "#10b981", red: "#ef4444",
+  cyan: "#06b6d4", purple: "#a78bfa",
+  text: "#f1f5f9", textSec: "#94a3b8", textMuted: "#64748b",
+};
+
+// ==================== SVG Icons ====================
+const Icon = ({ d, size = 16, color = "currentColor", fill = "none" }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d}</svg>
+);
+const IconBarChart = (p) => <Icon {...p} d={<><rect x="3" y="12" width="4" height="9"/><rect x="10" y="7" width="4" height="14"/><rect x="17" y="3" width="4" height="18"/></>} />;
+const IconMsg = (p) => <Icon {...p} d={<path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>} />;
+const IconWorkflow = (p) => <Icon {...p} d={<><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="3" width="6" height="6" rx="1"/><rect x="9" y="15" width="6" height="6" rx="1"/><path d="M6 9v3a1 1 0 001 1h4M18 9v3a1 1 0 01-1 1h-4"/></>} />;
+const IconWrench = (p) => <Icon {...p} d={<path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>} />;
+const IconDB = (p) => <Icon {...p} d={<><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></>} />;
+const IconShield = (p) => <Icon {...p} d={<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>} />;
+const IconSettings = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></>} />;
+const IconSend = (p) => <Icon {...p} d={<><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></>} />;
+const IconCheck = (p) => <Icon {...p} d={<polyline points="20 6 9 17 4 12"/>} />;
+const IconBot = (p) => <Icon {...p} d={<><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></>} />;
+const IconUsers = (p) => <Icon {...p} d={<><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></>} />;
+const IconCpu = (p) => <Icon {...p} d={<><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></>} />;
+const IconZap = (p) => <Icon {...p} d={<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>} />;
+const IconArrow = (p) => <Icon {...p} d={<><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></>} />;
+const IconChevron = (p) => <Icon {...p} d={<polyline points="9 18 15 12 9 6"/>} />;
+const IconRadio = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 010 8.49m-8.48-.01a6 6 0 010-8.49m11.31-2.82a10 10 0 010 14.14m-14.14 0a10 10 0 010-14.14"/></>} />;
+const IconStar = (p) => <Icon {...p} d={<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>} fill={p.fill || "none"} />;
+const IconSparkle = (p) => <Icon {...p} d={<><path d="M12 3l1.912 5.813a2 2 0 001.275 1.275L21 12l-5.813 1.912a2 2 0 00-1.275 1.275L12 21l-1.912-5.813a2 2 0 00-1.275-1.275L3 12l5.813-1.912a2 2 0 001.275-1.275L12 3z"/></>} />;
+const IconGauge = (p) => <Icon {...p} d={<><path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1117.32 0"/></>} />;
+const IconTarget = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></>} />;
+const IconActivity = (p) => <Icon {...p} d={<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>} />;
+const IconLayers = (p) => <Icon {...p} d={<><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></>} />;
+const IconRefresh = (p) => <Icon {...p} d={<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></>} />;
+
+// ==================== Mock Data ====================
+const tokenData = [
+  { t: "00:00", input: 1200, output: 800 }, { t: "00:05", input: 2400, output: 1600 },
+  { t: "00:10", input: 1800, output: 2200 }, { t: "00:15", input: 3200, output: 2800 },
+  { t: "00:20", input: 2600, output: 3400 }, { t: "00:25", input: 4100, output: 3000 },
+  { t: "00:30", input: 3600, output: 4200 },
+];
+const toolDist = [
+  { name: "bash", value: 32, color: "#6366f1" }, { name: "read", value: 28, color: "#06b6d4" },
+  { name: "write", value: 18, color: "#f59e0b" }, { name: "edit", value: 14, color: "#10b981" },
+  { name: "grep", value: 12, color: "#a78bfa" }, { name: "glob", value: 10, color: "#ec4899" },
+  { name: "其他", value: 8, color: "#64748b" },
+];
+const auditEvents = [
+  { id:1, type:"SessionStart", time:"14:32:01", detail:"session_0x7f3a 启动, model: deepseek-chat", level:"info" },
+  { id:2, type:"LlmRequest", time:"14:32:03", detail:"input: 2,340 tokens → output: 856 tokens", level:"info" },
+  { id:3, type:"ToolCall", time:"14:32:05", detail:"bash: cargo build --release (exit: 0, 3.2s)", level:"info" },
+  { id:4, type:"ToolCall", time:"14:32:08", detail:"read: src/core/loop.rs (4,521 bytes)", level:"info" },
+  { id:5, type:"ToolCall", time:"14:32:09", detail:"write: src/tools/new_tool.rs (1,203 bytes)", level:"info" },
+  { id:6, type:"SecurityEvent", time:"14:32:12", detail:"bash 风险命令拦截: rm -rf / (denied by guardrail)", level:"warn" },
+  { id:7, type:"ToolCall", time:"14:32:15", detail:"grep: 'fn run_simple_loop' → 3 matches", level:"info" },
+  { id:8, type:"LlmRequest", time:"14:32:18", detail:"input: 4,120 tokens → output: 1,230 tokens", level:"info" },
+  { id:9, type:"FileOperation", time:"14:32:20", detail:"snapshot: src/core/loop.rs → .orion/snapshots/", level:"info" },
+  { id:10, type:"Error", time:"14:32:22", detail:"provider timeout: deepseek-chat (30s → retry)", level:"error" },
+  { id:11, type:"ToolCall", time:"14:32:25", detail:"symbol_search: 'Provider' trait → core/provider.rs", level:"info" },
+  { id:12, type:"ConfigChange", time:"14:32:28", detail:"orchestrator.mode: sequential → parallel", level:"info" },
+];
+const toolsList = [
+  { name:"read", desc:"读取文件内容", cat:"核心", risk:"Safe", count:28 },
+  { name:"write", desc:"创建/覆盖文件", cat:"核心", risk:"Medium", count:18 },
+  { name:"edit", desc:"精确字符串替换编辑", cat:"核心", risk:"Low", count:14 },
+  { name:"bash", desc:"执行 Shell 命令 (5级风险)", cat:"核心", risk:"Safe→Critical", count:32 },
+  { name:"glob", desc:"文件名模式匹配搜索", cat:"搜索", risk:"Safe", count:10 },
+  { name:"grep", desc:"正则内容搜索", cat:"搜索", risk:"Safe", count:12 },
+  { name:"symbol_search", desc:"代码符号搜索 (AST)", cat:"代码智能", risk:"Safe", count:6 },
+  { name:"find_callers", desc:"函数调用链分析", cat:"代码智能", risk:"Safe", count:4 },
+  { name:"project_map", desc:"项目结构概览", cat:"代码智能", risk:"Safe", count:3 },
+  { name:"web_search", desc:"Web 搜索引擎", cat:"外部", risk:"Safe", count:5 },
+  { name:"create_sub_agent", desc:"创建子 Agent", cat:"编排", risk:"Low", count:8 },
+  { name:"send_message", desc:"Agent 间消息传递 (A2A)", cat:"编排", risk:"Low", count:6 },
+  { name:"list_peers", desc:"列出可通信 Agent", cat:"编排", risk:"Safe", count:2 },
+  { name:"ask_user", desc:"向用户提问", cat:"交互", risk:"Safe", count:3 },
+  { name:"mcp_call", desc:"MCP 协议工具调用", cat:"外部", risk:"Low", count:7 },
+  { name:"multi_shell", desc:"多终端并行管理", cat:"核心", risk:"Medium", count:4 },
+  { name:"web_fetch", desc:"网页内容抓取", cat:"外部", risk:"Safe", count:3 },
+];
+const chatMsgs = [
+  { role:"user", content:"帮我分析一下 src/core/loop.rs 的核心执行循环，并找出所有使用 StepObserver 的地方。" },
+  { role:"assistant", content:"我来分析核心执行循环并搜索 StepObserver 的使用位置。",
+    thinking:"用户想了解 loop.rs 的核心逻辑和 StepObserver 的集成点。需要读取文件内容并搜索引用，这两个操作可以并行执行。",
+    tools:[
+      { name:"read", input:'{ path: "src/core/loop.rs" }', status:"done", result:"读取成功 (4,521 bytes, 187 行)" },
+      { name:"grep", input:'{ pattern: "StepObserver", path: "src/" }', status:"done", result:"找到 5 处匹配" },
+    ]},
+  { role:"assistant", content:"## 分析结果\n\nrun_simple_loop() 是 Agent 的核心心跳循环，实现了 思考 → 工具调用 → 观察 的迭代模式：\n\n核心流程：\n1. Provider.stream() — 流式调用 LLM\n2. 解析 ContentBlock::ToolUse — 提取工具调用\n3. ToolRegistry.execute() — 执行工具（只读自动并行）\n4. StepObserver.observe() — 观察结果并决策\n\nStepObserver 的 4 种决策：Continue / Retry / Replan / EarlyStop\n\n在以下 5 个位置被使用：\n- loop.rs:42 — 初始化\n- loop.rs:87 — 工具执行后观察\n- loop.rs:112 — 错误分类判断\n- loop.rs:134 — 重试决策\n- loop.rs:156 — 上下文压缩触发点" },
+  { role:"user", content:"创建一个子 Agent 来审查这段代码的安全性。" },
+  { role:"assistant", content:"好的，创建 Review 类型子 Agent 进行安全审查。",
+    tools:[
+      { name:"create_sub_agent", input:'{ type: "review", task: "审查 loop.rs 安全性" }', status:"running", result:null },
+    ]},
+];
+const orchTasks = [
+  { id:"T1", name:"需求分析", status:"done", worker:"Worker-Search", deps:[], duration:"12s" },
+  { id:"T2", name:"代码生成", status:"done", worker:"Worker-Code", deps:["T1"], duration:"45s" },
+  { id:"T3", name:"单元测试", status:"running", worker:"Worker-Code", deps:["T2"], duration:"28s" },
+  { id:"T4", name:"安全审查", status:"pending", worker:"Worker-Review", deps:["T2"], duration:"-" },
+  { id:"T5", name:"集成验证", status:"pending", worker:"Worker-Code", deps:["T3","T4"], duration:"-" },
+];
+const sessionsList = [
+  { id:"sess_0x7f3a", model:"deepseek-chat", created:"2026-06-10 14:32", turns:12, tokens:48200, status:"active", size:"24.3 KB" },
+  { id:"sess_0x6e2b", model:"claude-sonnet-4", created:"2026-06-10 11:15", turns:28, tokens:124500, status:"idle", size:"89.7 KB" },
+  { id:"sess_0x5d1c", model:"qwen-max", created:"2026-06-09 16:40", turns:8, tokens:32100, status:"idle", size:"15.2 KB" },
+  { id:"sess_0x4c0d", model:"deepseek-chat", created:"2026-06-09 09:20", turns:45, tokens:256000, status:"archived", size:"156 KB" },
+  { id:"sess_0x3b9e", model:"gpt-4o", created:"2026-06-08 20:10", turns:15, tokens:67800, status:"archived", size:"42.1 KB" },
+];
+const navItems = [
+  { id:"dashboard", label:"仪表盘", icon: IconBarChart },
+  { id:"chat", label:"Agent 对话", icon: IconMsg },
+  { id:"orchestrator", label:"编排引擎", icon: IconWorkflow },
+  { id:"tools", label:"工具注册表", icon: IconWrench },
+  { id:"sessions", label:"会话管理", icon: IconDB },
+  { id:"audit", label:"审计日志", icon: IconShield },
+  { id:"settings", label:"系统配置", icon: IconSettings },
+];
+
+// ==================== Helpers ====================
+const StatusDot = ({ status }) => {
+  const m = { active:C.green, running:C.green, done:C.primary, idle:C.accent, pending:C.textMuted, archived:C.textMuted, error:C.red, warn:C.accent };
+  const c = m[status] || C.textMuted;
+  return <span style={{ display:"inline-block", width:8, height:8, borderRadius:"50%", backgroundColor:c, boxShadow: (status==="active"||status==="running") ? `0 0 8px ${c}60` : "none" }} />;
+};
+const Badge = ({ children, color = C.primary }) => (
+  <span style={{ display:"inline-flex", alignItems:"center", padding:"2px 8px", borderRadius:6, fontSize:11, fontWeight:600, backgroundColor:color+"20", color, border:`1px solid ${color}30` }}>{children}</span>
+);
+const RiskBadge = ({ risk }) => {
+  const m = { Safe:C.green, Low:C.cyan, Medium:C.accent, "Safe→Critical":C.red };
+  return <Badge color={m[risk]||C.textMuted}>{risk}</Badge>;
+};
+const Card = ({ children, style={} }) => (
+  <div style={{ backgroundColor:C.surface, borderRadius:12, border:`1px solid ${C.border}`, padding:20, ...style }}>{children}</div>
+);
+const StatCard = ({ icon:Ic, label, value, sub, color=C.primary }) => (
+  <Card style={{ display:"flex", flexDirection:"column", gap:8 }}>
+    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+      <div style={{ width:36, height:36, borderRadius:10, backgroundColor:color+"18", display:"flex", alignItems:"center", justifyContent:"center" }}>
+        <Ic size={18} color={color} />
+      </div>
+      <span style={{ fontSize:12, color:C.textSec }}>{label}</span>
+    </div>
+    <div style={{ fontSize:28, fontWeight:700, color:C.text }}>{value}</div>
+    {sub && <div style={{ fontSize:11, color:C.textMuted }}>{sub}</div>}
+  </Card>
+);
+const SectionTitle = ({ icon:Ic, title, subtitle }) => (
+  <div style={{ marginBottom:20 }}>
+    <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+      {Ic && <Ic size={20} color={C.primaryLight} />}
+      <h2 style={{ fontSize:20, fontWeight:700, color:C.text, margin:0 }}>{title}</h2>
+    </div>
+    {subtitle && <p style={{ fontSize:13, color:C.textMuted, margin:"4px 0 0 30px" }}>{subtitle}</p>}
+  </div>
+);
+
+// ==================== Page: Dashboard ====================
+function DashboardPage() {
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24, animation:"fadeIn 0.3s ease" }}>
+      <SectionTitle icon={IconBarChart} title="系统概览" subtitle="Orion Agent Framework v0.1.0 — 实时运行状态" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16 }}>
+        <StatCard icon={IconMsg} label="对话轮次" value="127" sub="今日 +23 轮" color={C.primary} />
+        <StatCard icon={IconCpu} label="Token 消耗" value="1.2M" sub="input 680K / output 520K" color={C.cyan} />
+        <StatCard icon={IconWrench} label="工具调用" value="342" sub="成功率 98.2%" color={C.green} />
+        <StatCard icon={IconZap} label="缓存命中率" value="78%" sub="L1: 68% / L2: 22%" color={C.accent} />
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:16 }}>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>Token 使用趋势</div>
+          <ResponsiveContainer width="100%" height={200}>
+            <AreaChart data={tokenData}>
+              <defs>
+                <linearGradient id="gI" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.primary} stopOpacity={0.3}/><stop offset="100%" stopColor={C.primary} stopOpacity={0}/></linearGradient>
+                <linearGradient id="gO" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.cyan} stopOpacity={0.3}/><stop offset="100%" stopColor={C.cyan} stopOpacity={0}/></linearGradient>
+              </defs>
+              <XAxis dataKey="t" tick={{fontSize:11,fill:C.textMuted}} axisLine={false} tickLine={false} />
+              <YAxis tick={{fontSize:11,fill:C.textMuted}} axisLine={false} tickLine={false} />
+              <Tooltip contentStyle={{backgroundColor:C.surface,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}} />
+              <Area type="monotone" dataKey="input" stroke={C.primary} fill="url(#gI)" strokeWidth={2} name="Input" />
+              <Area type="monotone" dataKey="output" stroke={C.cyan} fill="url(#gO)" strokeWidth={2} name="Output" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </Card>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>工具调用分布</div>
+          <ResponsiveContainer width="100%" height={200}>
+            <PieChart>
+              <Pie data={toolDist} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="value" stroke="none">
+                {toolDist.map((e,i) => <Cell key={i} fill={e.color} />)}
+              </Pie>
+              <Tooltip contentStyle={{backgroundColor:C.surface,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}} />
+            </PieChart>
+          </ResponsiveContainer>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8, justifyContent:"center" }}>
+            {toolDist.slice(0,5).map(t => (
+              <span key={t.name} style={{ fontSize:11, color:C.textSec, display:"flex", alignItems:"center", gap:4 }}>
+                <span style={{ width:8, height:8, borderRadius:2, backgroundColor:t.color }} />{t.name}
+              </span>
+            ))}
+          </div>
+        </Card>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>架构层级</div>
+          {[
+            { name:"Gateway 元系统层", desc:"命令路由 · 日志 · 事件总线 · 审计", modules:4 },
+            { name:"UI 层", desc:"REPL · TUI · Web API", modules:3 },
+            { name:"编排层 Orchestrator", desc:"Coordinator · Worker · Plan (DAG)", modules:3 },
+            { name:"Agent 运行时", desc:"Runtime · Lanes · Protocol", modules:3 },
+            { name:"核心层 Core", desc:"Provider · Loop · Context · Guardrail · Cache", modules:5 },
+            { name:"工具层 Tools", desc:"17 个内置工具 + MCP 扩展", modules:17 },
+            { name:"基础设施", desc:"Session · Index · Plugin · Model", modules:4 },
+          ].map((l,i) => (
+            <div key={i} style={{ display:"flex", alignItems:"center", gap:12, padding:"8px 12px", borderRadius:8, marginBottom:6, backgroundColor:i%2===0?C.hover:"transparent" }}>
+              <StatusDot status="active" />
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{l.name}</div>
+                <div style={{ fontSize:11, color:C.textMuted }}>{l.desc}</div>
+              </div>
+              <Badge color={C.primaryLight}>{l.modules} 模块</Badge>
+            </div>
+          ))}
+        </Card>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>实时活动流</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {auditEvents.slice(0,8).map(evt => (
+              <div key={evt.id} style={{ display:"flex", gap:10, padding:"6px 0", borderBottom:`1px solid ${C.border}` }}>
+                <span style={{ fontSize:11, color:C.textMuted, fontFamily:"monospace", whiteSpace:"nowrap" }}>{evt.time}</span>
+                <Badge color={evt.level==="error"?C.red:evt.level==="warn"?C.accent:C.primaryLight}>{evt.type}</Badge>
+                <span style={{ fontSize:12, color:C.textSec, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{evt.detail}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ==================== Page: Chat ====================
+function ChatPage() {
+  const [input, setInput] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [streamText, setStreamText] = useState("");
+  const chatRef = useRef(null);
+  const fullText = "正在通过 Provider.stream() 流式调用 DeepSeek...\n\n已完成代码安全审查，发现 2 个潜在风险点：\n1. bash 工具执行命令时缺少完整的路径白名单校验\n2. write 工具对工作区外的路径检查存在 TOCTOU 竞态条件\n\n建议：增加 ExecPolicy 白名单覆盖，并在 workspace.rs 中引入文件锁。";
+
+  useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [streamText]);
+
+  const handleSend = () => {
+    if (!input.trim()) return;
+    setStreaming(true); setStreamText(""); setInput("");
+    let i = 0;
+    const iv = setInterval(() => {
+      if (i < fullText.length) { setStreamText(fullText.slice(0, i+1)); i++; }
+      else { clearInterval(iv); setStreaming(false); }
+    }, 20);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", height:"calc(100vh - 80px)", animation:"fadeIn 0.3s ease" }}>
+      <SectionTitle icon={IconMsg} title="Agent 对话" subtitle="基于 run_simple_loop() 的流式对话 — 支持工具调用、上下文压缩、缓存命中" />
+      <div ref={chatRef} style={{ flex:1, overflowY:"auto", display:"flex", flexDirection:"column", gap:16, padding:"0 4px 16px 4px" }}>
+        {chatMsgs.map((msg,i) => (
+          <div key={i}>
+            <div style={{ display:"flex", gap:12, flexDirection: msg.role==="user" ? "row-reverse" : "row" }}>
+              <div style={{ width:32, height:32, borderRadius:8, flexShrink:0, backgroundColor: msg.role==="user" ? C.accent+"30" : C.primary+"30", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                {msg.role==="user" ? <IconUsers size={16} color={C.accent} /> : <IconBot size={16} color={C.primaryLight} />}
+              </div>
+              <div style={{ maxWidth:"75%", padding:"12px 16px", borderRadius:12, backgroundColor: msg.role==="user" ? C.primary+"15" : C.hover, border:`1px solid ${msg.role==="user" ? C.primary+"30" : C.border}` }}>
+                {msg.thinking && (
+                  <div style={{ marginBottom:10, padding:"8px 12px", borderRadius:8, backgroundColor:C.purple+"12", border:`1px solid ${C.purple}25`, fontSize:12, color:C.purple, fontStyle:"italic" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:4 }}><IconSparkle size={12} color={C.purple} /><span style={{ fontWeight:600 }}>Thinking</span></div>
+                    {msg.thinking}
+                  </div>
+                )}
+                <div style={{ fontSize:13, color:C.text, lineHeight:1.6, whiteSpace:"pre-wrap" }}>{msg.content}</div>
+                {msg.tools && (
+                  <div style={{ marginTop:12, display:"flex", flexDirection:"column", gap:6 }}>
+                    {msg.tools.map((tool,j) => (
+                      <div key={j} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 10px", borderRadius:8, backgroundColor:C.bg, border:`1px solid ${C.border}`, fontSize:12 }}>
+                        <IconWrench size={12} color={C.cyan} />
+                        <span style={{ fontWeight:600, color:C.cyan }}>{tool.name}</span>
+                        <span style={{ color:C.textMuted, fontFamily:"monospace", fontSize:11 }}>{tool.input}</span>
+                        <span style={{ marginLeft:"auto" }}>
+                          {tool.status==="done"
+                            ? <Badge color={C.green}><IconCheck size={10} color={C.green} /> {tool.result}</Badge>
+                            : <Badge color={C.accent}><IconRefresh size={10} color={C.accent} /> 执行中...</Badge>}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+        {streaming && (
+          <div style={{ display:"flex", gap:12 }}>
+            <div style={{ width:32, height:32, borderRadius:8, flexShrink:0, backgroundColor:C.primary+"30", display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <IconBot size={16} color={C.primaryLight} />
+            </div>
+            <div style={{ maxWidth:"75%", padding:"12px 16px", borderRadius:12, backgroundColor:C.hover, border:`1px solid ${C.border}`, fontSize:13, color:C.text, lineHeight:1.6, whiteSpace:"pre-wrap" }}>
+              {streamText}<span style={{ display:"inline-block", width:2, height:14, backgroundColor:C.primaryLight, marginLeft:2, animation:"blink 0.8s infinite", verticalAlign:"middle" }} />
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ display:"flex", gap:10, padding:"12px 0 0 0", borderTop:`1px solid ${C.border}` }}>
+        <div style={{ display:"flex", gap:6, alignItems:"center", padding:"0 12px", borderRadius:8, backgroundColor:C.hover, border:`1px solid ${C.border}` }}>
+          <IconBot size={14} color={C.primaryLight} /><span style={{ fontSize:12, color:C.textSec }}>deepseek-chat</span>
+        </div>
+        <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleSend()}
+          placeholder="输入消息... (支持 /model、/think、/compact 等斜杠命令)"
+          style={{ flex:1, padding:"10px 16px", borderRadius:10, backgroundColor:C.surface, border:`1px solid ${C.border}`, color:C.text, fontSize:13, outline:"none" }} />
+        <button onClick={handleSend} style={{ padding:"10px 20px", borderRadius:10, border:"none", backgroundColor:C.primary, color:"#fff", fontSize:13, fontWeight:600, cursor:"pointer", display:"flex", alignItems:"center", gap:6 }}>
+          <IconSend size={14} color="#fff" /> 发送
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ==================== Page: Orchestrator ====================
+function OrchestratorPage() {
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24, animation:"fadeIn 0.3s ease" }}>
+      <SectionTitle icon={IconWorkflow} title="多 Agent 编排引擎" subtitle="Coordinator 通过 LLM 自动拆解任务为 DAG，Worker 独立执行子任务" />
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:16 }}>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>编排配置</div>
+          {[
+            { label:"编排模式", value:"Sequential → Parallel", icon:IconLayers },
+            { label:"协调模型", value:"deepseek-chat", icon:IconCpu },
+            { label:"最大 Worker", value:"3", icon:IconUsers },
+            { label:"最大轮次", value:"10", icon:IconTarget },
+            { label:"Token 预算", value:"128,000", icon:IconGauge },
+          ].map((item,i,arr) => (
+            <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 0", borderBottom: i<arr.length-1 ? `1px solid ${C.border}` : "none" }}>
+              <item.icon size={14} color={C.textMuted} />
+              <span style={{ fontSize:12, color:C.textSec, flex:1 }}>{item.label}</span>
+              <span style={{ fontSize:12, fontWeight:600, color:C.text }}>{item.value}</span>
+            </div>
+          ))}
+          <div style={{ marginTop:16, padding:12, borderRadius:8, backgroundColor:C.bg, border:`1px solid ${C.border}` }}>
+            <div style={{ fontSize:11, fontWeight:600, color:C.textMuted, marginBottom:8 }}>Worker 类型</div>
+            {[
+              { type:"Search", desc:"只读探索", color:C.cyan },
+              { type:"Code", desc:"读写+执行", color:C.green },
+              { type:"Review", desc:"只读审查", color:C.purple },
+            ].map((w,i) => (
+              <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 0" }}>
+                <span style={{ width:8, height:8, borderRadius:2, backgroundColor:w.color }} />
+                <span style={{ fontSize:12, fontWeight:600, color:w.color }}>{w.type}</span>
+                <span style={{ fontSize:11, color:C.textMuted }}>{w.desc}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>任务 DAG — 实时执行状态</div>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:20 }}>
+            <div style={{ padding:"8px 16px", borderRadius:10, backgroundColor:C.primary+"20", border:`1px solid ${C.primary}40`, display:"flex", alignItems:"center", gap:8 }}>
+              <IconSparkle size={14} color={C.primaryLight} />
+              <span style={{ fontSize:13, fontWeight:600, color:C.primaryLight }}>Coordinator</span>
+              <Badge color={C.green}>active</Badge>
+            </div>
+          </div>
+          {orchTasks.map((task,i) => (
+            <div key={task.id} style={{ display:"flex", alignItems:"flex-start", gap:16, marginBottom:4 }}>
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center", width:40 }}>
+                <div style={{ width:36, height:36, borderRadius:"50%",
+                  backgroundColor: task.status==="done" ? C.green+"20" : task.status==="running" ? C.accent+"20" : C.hover,
+                  border:`2px solid ${task.status==="done" ? C.green : task.status==="running" ? C.accent : C.border}`,
+                  display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700,
+                  color: task.status==="done" ? C.green : task.status==="running" ? C.accent : C.textMuted }}>
+                  {task.status==="done" ? <IconCheck size={16} color={C.green} /> : task.id}
+                </div>
+                {i < orchTasks.length-1 && <div style={{ width:2, height:28, backgroundColor:C.border, marginTop:4 }} />}
+              </div>
+              <div style={{ flex:1, padding:"10px 14px", borderRadius:10, backgroundColor:C.hover,
+                border:`1px solid ${task.status==="running" ? C.accent+"40" : C.border}`, marginBottom:8 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <span style={{ fontSize:14, fontWeight:600, color:C.text }}>{task.name}</span>
+                  <StatusDot status={task.status} />
+                  <Badge color={task.status==="done"?C.green:task.status==="running"?C.accent:C.textMuted}>{task.status}</Badge>
+                  <span style={{ marginLeft:"auto", fontSize:11, color:C.textMuted }}>{task.duration}</span>
+                </div>
+                <div style={{ display:"flex", gap:12, marginTop:6 }}>
+                  <span style={{ fontSize:11, color:C.textMuted }}>Worker: {task.worker}</span>
+                  {task.deps.length > 0 && <span style={{ fontSize:11, color:C.textMuted }}>依赖: {task.deps.join(", ")}</span>}
+                </div>
+              </div>
+            </div>
+          ))}
+        </Card>
+      </div>
+      <Card>
+        <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>编排执行流程</div>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, flexWrap:"wrap" }}>
+          {[
+            { label:"用户输入", sub:"自然语言任务", color:C.accent },
+            { label:"Coordinator", sub:"LLM 任务拆解", color:C.primary },
+            { label:"TaskPlan", sub:"DAG 依赖解析", color:C.cyan },
+            { label:"Worker 分派", sub:"独立上下文执行", color:C.green },
+            { label:"StepObserver", sub:"结果观察/重试", color:C.purple },
+            { label:"结果汇总", sub:"合并子任务输出", color:C.accent },
+          ].map((step,i,arr) => (
+            <div key={i} style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <div style={{ padding:"10px 16px", borderRadius:10, backgroundColor:step.color+"15", border:`1px solid ${step.color}30`, textAlign:"center", minWidth:100 }}>
+                <div style={{ fontSize:13, fontWeight:600, color:step.color }}>{step.label}</div>
+                <div style={{ fontSize:10, color:C.textMuted, marginTop:2 }}>{step.sub}</div>
+              </div>
+              {i < arr.length-1 && <IconChevron size={16} color={C.textMuted} />}
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ==================== Page: Tools ====================
+function ToolsPage() {
+  const [cat, setCat] = useState("全部");
+  const cats = ["全部","核心","搜索","代码智能","编排","外部","交互"];
+  const filtered = cat==="全部" ? toolsList : toolsList.filter(t=>t.cat===cat);
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24, animation:"fadeIn 0.3s ease" }}>
+      <SectionTitle icon={IconWrench} title="工具注册表" subtitle="17 个内置工具 — 按需组合，支持 MCP 协议扩展" />
+      <div style={{ display:"flex", gap:8 }}>
+        {cats.map(c => (
+          <button key={c} onClick={()=>setCat(c)} style={{ padding:"6px 14px", borderRadius:8, border:"none", cursor:"pointer", fontSize:12, fontWeight:600,
+            backgroundColor: cat===c ? C.primary : C.hover, color: cat===c ? "#fff" : C.textSec }}>{c}</button>
+        ))}
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
+        {filtered.map(tool => (
+          <Card key={tool.name} style={{ padding:16 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+              <div style={{ width:28, height:28, borderRadius:8, backgroundColor:C.primary+"18", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                <IconWrench size={14} color={C.primaryLight} />
+              </div>
+              <span style={{ fontSize:14, fontWeight:700, color:C.text, fontFamily:"monospace" }}>{tool.name}</span>
+              <div style={{ marginLeft:"auto" }}><RiskBadge risk={tool.risk} /></div>
+            </div>
+            <div style={{ fontSize:12, color:C.textSec, marginBottom:8 }}>{tool.desc}</div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <Badge color={C.textMuted}>{tool.cat}</Badge>
+              <span style={{ fontSize:11, color:C.textMuted }}>调用 {tool.count} 次</span>
+            </div>
+          </Card>
+        ))}
+      </div>
+      <Card>
+        <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>工具执行流水线 (AOP)</div>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, flexWrap:"wrap" }}>
+          {[
+            { label:"ToolCall 请求", color:C.accent }, { label:"ExecPolicy 白名单", color:C.red },
+            { label:"GuardrailChain", color:C.red }, { label:"HookEngine before", color:C.purple },
+            { label:"AOP 路径规范化", color:C.cyan }, { label:"执行工具", color:C.green },
+            { label:"HookEngine after", color:C.purple }, { label:"StepObserver", color:C.primary },
+          ].map((step,i,arr) => (
+            <div key={i} style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <div style={{ padding:"6px 12px", borderRadius:8, backgroundColor:step.color+"15", border:`1px solid ${step.color}30`, fontSize:11, fontWeight:600, color:step.color }}>{step.label}</div>
+              {i < arr.length-1 && <IconChevron size={14} color={C.textMuted} />}
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ==================== Page: Sessions ====================
+function SessionsPage() {
+  const [sel, setSel] = useState(sessionsList[0]);
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24, animation:"fadeIn 0.3s ease" }}>
+      <SectionTitle icon={IconDB} title="会话管理" subtitle="SQLite 持久化 + JSONL 转录 + 文件回滚快照" />
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+        <Card style={{ padding:0, overflow:"hidden" }}>
+          <div style={{ padding:"14px 16px", borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", gap:8 }}>
+            <IconDB size={14} color={C.primaryLight} /><span style={{ fontSize:14, fontWeight:600, color:C.text }}>会话列表</span>
+            <Badge color={C.primaryLight}>{sessionsList.length} 个会话</Badge>
+          </div>
+          {sessionsList.map(sess => (
+            <div key={sess.id} onClick={()=>setSel(sess)} style={{ padding:"12px 16px", cursor:"pointer", borderBottom:`1px solid ${C.border}`, backgroundColor: sel.id===sess.id ? C.hover : "transparent" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <StatusDot status={sess.status} />
+                <span style={{ fontSize:13, fontWeight:600, color:C.text, fontFamily:"monospace" }}>{sess.id}</span>
+                <Badge color={sess.status==="active"?C.green:sess.status==="idle"?C.accent:C.textMuted}>{sess.status}</Badge>
+              </div>
+              <div style={{ display:"flex", gap:16, marginTop:6, fontSize:11, color:C.textMuted }}>
+                <span>model: {sess.model}</span><span>{sess.turns} 轮</span><span>{(sess.tokens/1000).toFixed(1)}K tokens</span>
+              </div>
+            </div>
+          ))}
+        </Card>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>会话详情 — <span style={{ fontFamily:"monospace", color:C.primaryLight }}>{sel.id}</span></div>
+          {[
+            { label:"会话 ID", value:sel.id }, { label:"模型", value:sel.model }, { label:"创建时间", value:sel.created },
+            { label:"对话轮次", value:sel.turns+" 轮" }, { label:"Token 消耗", value:sel.tokens.toLocaleString() },
+            { label:"存储大小", value:sel.size }, { label:"状态", value:sel.status },
+          ].map((item,i,arr) => (
+            <div key={i} style={{ display:"flex", alignItems:"center", padding:"10px 0", borderBottom: i<arr.length-1 ? `1px solid ${C.border}` : "none" }}>
+              <span style={{ fontSize:12, color:C.textMuted, width:100 }}>{item.label}</span>
+              <span style={{ fontSize:13, fontWeight:600, color:C.text, fontFamily:"monospace" }}>{item.value}</span>
+            </div>
+          ))}
+          <div style={{ marginTop:16 }}>
+            <div style={{ fontSize:12, fontWeight:600, color:C.textMuted, marginBottom:8 }}>存储结构</div>
+            <div style={{ padding:12, borderRadius:8, backgroundColor:C.bg, border:`1px solid ${C.border}`, fontFamily:"monospace", fontSize:11, color:C.textSec, lineHeight:1.8 }}>
+              <div>.orion/sessions/</div>
+              <div style={{ paddingLeft:16 }}>├── {sel.id}/</div>
+              <div style={{ paddingLeft:32 }}>├── transcript.jsonl <span style={{ color:C.textMuted }}># 对话转录</span></div>
+              <div style={{ paddingLeft:32 }}>├── index.json <span style={{ color:C.textMuted }}># 快速索引</span></div>
+              <div style={{ paddingLeft:32 }}>├── snapshots/ <span style={{ color:C.textMuted }}># 文件快照</span></div>
+              <div style={{ paddingLeft:32 }}>└── audit.jsonl <span style={{ color:C.textMuted }}># 审计日志</span></div>
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:8, marginTop:16 }}>
+            <button style={{ flex:1, padding:"8px 12px", borderRadius:8, border:"none", backgroundColor:C.primary, color:"#fff", fontSize:12, fontWeight:600, cursor:"pointer" }}>恢复会话 (--resume)</button>
+            <button style={{ flex:1, padding:"8px 12px", borderRadius:8, border:`1px solid ${C.border}`, backgroundColor:"transparent", color:C.textSec, fontSize:12, fontWeight:600, cursor:"pointer" }}>导出 JSONL</button>
+          </div>
+        </Card>
+      </div>
+      <Card>
+        <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>跨 Session 记忆系统</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10 }}>
+          {[
+            { cat:"UserPreference", count:8, color:C.accent, desc:"用户偏好" },
+            { cat:"ProjectFact", count:15, color:C.cyan, desc:"项目事实" },
+            { cat:"CodePattern", count:12, color:C.green, desc:"代码模式" },
+            { cat:"Decision", count:6, color:C.purple, desc:"关键决策" },
+            { cat:"Constraint", count:4, color:C.red, desc:"约束条件" },
+          ].map(mem => (
+            <div key={mem.cat} style={{ padding:12, borderRadius:10, backgroundColor:mem.color+"10", border:`1px solid ${mem.color}25`, textAlign:"center" }}>
+              <div style={{ fontSize:22, fontWeight:700, color:mem.color }}>{mem.count}</div>
+              <div style={{ fontSize:12, fontWeight:600, color:C.text, marginTop:4 }}>{mem.desc}</div>
+              <div style={{ fontSize:10, color:C.textMuted, fontFamily:"monospace" }}>{mem.cat}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ==================== Page: Audit ====================
+function AuditPage() {
+  const [filter, setFilter] = useState("全部");
+  const types = ["全部","SessionStart","LlmRequest","ToolCall","FileOperation","SecurityEvent","Error","ConfigChange"];
+  const filtered = filter==="全部" ? auditEvents : auditEvents.filter(e=>e.type===filter);
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24, animation:"fadeIn 0.3s ease" }}>
+      <SectionTitle icon={IconShield} title="审计日志" subtitle="9 种事件类型 · JSONL 格式 · 敏感信息自动脱敏" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+        <StatCard icon={IconActivity} label="今日事件" value="1,247" sub="9 种类型" color={C.primary} />
+        <StatCard icon={IconShield} label="安全事件" value="3" sub="全部已拦截" color={C.red} />
+        <StatCard icon={IconWrench} label="工具调用" value="342" sub="成功率 98.2%" color={C.green} />
+        <StatCard icon={IconCpu} label="LLM 请求" value="89" sub="平均 2.1s/req" color={C.cyan} />
+      </div>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+        {types.map(t => (
+          <button key={t} onClick={()=>setFilter(t)} style={{ padding:"5px 12px", borderRadius:6, border:"none", cursor:"pointer", fontSize:11, fontWeight:600,
+            backgroundColor: filter===t ? C.primary : C.hover, color: filter===t ? "#fff" : C.textSec }}>{t}</button>
+        ))}
+      </div>
+      <Card style={{ padding:0, overflow:"hidden" }}>
+        <div style={{ display:"grid", gridTemplateColumns:"70px 140px 1fr 80px", padding:"10px 16px", borderBottom:`1px solid ${C.border}`, fontSize:11, fontWeight:600, color:C.textMuted }}>
+          <span>时间</span><span>事件类型</span><span>详情</span><span>级别</span>
+        </div>
+        {filtered.map(evt => (
+          <div key={evt.id} style={{ display:"grid", gridTemplateColumns:"70px 140px 1fr 80px", padding:"10px 16px", borderBottom:`1px solid ${C.border}`, fontSize:12, alignItems:"center",
+            backgroundColor: evt.level==="error" ? C.red+"08" : evt.level==="warn" ? C.accent+"08" : "transparent" }}>
+            <span style={{ fontFamily:"monospace", color:C.textMuted, fontSize:11 }}>{evt.time}</span>
+            <Badge color={evt.type==="SecurityEvent"?C.red:evt.type==="Error"?C.red:evt.type==="ToolCall"?C.cyan:evt.type==="LlmRequest"?C.green:evt.type==="ConfigChange"?C.purple:C.primaryLight}>{evt.type}</Badge>
+            <span style={{ color:C.textSec, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{evt.detail}</span>
+            <Badge color={evt.level==="error"?C.red:evt.level==="warn"?C.accent:C.green}>{evt.level}</Badge>
+          </div>
+        ))}
+      </Card>
+      <Card>
+        <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:12 }}>审计数据格式 (JSONL)</div>
+        <div style={{ padding:16, borderRadius:8, backgroundColor:C.bg, border:`1px solid ${C.border}`, fontFamily:"monospace", fontSize:11, color:C.textSec, lineHeight:1.8, overflowX:"auto" }}>
+          <div style={{ color:C.textMuted }}>{"// 每行一条 JSON 记录，便于流式写入和日志分析"}</div>
+          <div>{"{"}</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"timestamp"</span>: <span style={{ color:C.green }}>"2026-06-10T14:32:05.123Z"</span>,</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"session_id"</span>: <span style={{ color:C.green }}>"sess_0x7f3a"</span>,</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"event_type"</span>: <span style={{ color:C.green }}>"ToolCall"</span>,</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"tool_name"</span>: <span style={{ color:C.green }}>"bash"</span>,</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"input_summary"</span>: <span style={{ color:C.green }}>"cargo build --release"</span>,</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"risk_level"</span>: <span style={{ color:C.green }}>"Low"</span>,</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"success"</span>: <span style={{ color:C.primary }}>true</span>,</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"duration_ms"</span>: <span style={{ color:C.primary }}>3200</span>,</div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>"api_key"</span>: <span style={{ color:C.red }}>"sk-***"</span> <span style={{ color:C.textMuted }}>{"// 自动脱敏"}</span></div>
+          <div>{"}"}</div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ==================== Page: Settings ====================
+function SettingsPage() {
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24, animation:"fadeIn 0.3s ease" }}>
+      <SectionTitle icon={IconSettings} title="系统配置" subtitle="YAML 配置 + 环境变量替换 + 模型注册表" />
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>Provider 配置</div>
+          {[
+            { label:"类型", value:"OpenAI Compatible" }, { label:"API Base", value:"https://api.deepseek.com/v1" },
+            { label:"模型", value:"deepseek-chat" }, { label:"Thinking", value:"disabled" }, { label:"API Key", value:"sk-*** (已脱敏)" },
+          ].map((item,i,arr) => (
+            <div key={i} style={{ display:"flex", alignItems:"center", padding:"10px 0", borderBottom: i<arr.length-1 ? `1px solid ${C.border}` : "none" }}>
+              <StatusDot status="active" />
+              <span style={{ fontSize:12, color:C.textMuted, width:80, marginLeft:8 }}>{item.label}</span>
+              <span style={{ fontSize:13, fontWeight:500, color:C.text, fontFamily:"monospace" }}>{item.value}</span>
+            </div>
+          ))}
+          <div style={{ marginTop:16, fontSize:12, fontWeight:600, color:C.textMuted, marginBottom:8 }}>支持的 Provider</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+            {["OpenAI","Anthropic","DeepSeek","Qwen","Ollama","Custom"].map(p => <Badge key={p} color={C.cyan}>{p}</Badge>)}
+          </div>
+        </Card>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>三层缓存系统</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginBottom:16 }}>
+            {[
+              { label:"L1 工具缓存", max:"2,048", ttl:"300s", color:C.primary },
+              { label:"L2 上下文缓存", max:"128", ttl:"600s", color:C.cyan },
+              { label:"文件缓存", max:"∞", ttl:"mtime", color:C.green },
+            ].map(c => (
+              <div key={c.label} style={{ padding:12, borderRadius:10, backgroundColor:c.color+"10", border:`1px solid ${c.color}25`, textAlign:"center" }}>
+                <div style={{ fontSize:11, fontWeight:600, color:c.color }}>{c.label}</div>
+                <div style={{ fontSize:20, fontWeight:700, color:C.text, marginTop:4 }}>{c.max}</div>
+                <div style={{ fontSize:10, color:C.textMuted }}>TTL: {c.ttl}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:12 }}>缓存失效向量 (10种)</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
+            {["SystemPromptChange","ToolDefinitionChange","NewMessage","ToolResultChange","ContextCompaction","ModelSwitch","SessionResume","FileContentChange","EnvVarChange","UserPreferenceChange"].map(v => (
+              <span key={v} style={{ padding:"3px 8px", borderRadius:4, fontSize:10, fontFamily:"monospace", backgroundColor:C.hover, color:C.textSec, border:`1px solid ${C.border}` }}>{v}</span>
+            ))}
+          </div>
+        </Card>
+      </div>
+      <Card>
+        <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>config.yaml</div>
+        <div style={{ padding:16, borderRadius:8, backgroundColor:C.bg, border:`1px solid ${C.border}`, fontFamily:"monospace", fontSize:12, color:C.textSec, lineHeight:2 }}>
+          <div><span style={{ color:C.textMuted }}>{"# 猎户座 Agent 配置"}</span></div>
+          <div><span style={{ color:C.textMuted }}>{"# 所有 ${'{'}VAR{'}'} 会被替换为环境变量"}</span></div>
+          <div />
+          <div><span style={{ color:C.accent }}>provider:</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>type:</span> <span style={{ color:C.green }}>openai</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>api_key:</span> <span style={{ color:C.green }}>{"${LLM_API_KEY}"}</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>api_base:</span> <span style={{ color:C.green }}>{"${LLM_API_BASE}"}</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>model:</span> <span style={{ color:C.green }}>{"${LLM_MODEL}"}</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>thinking:</span> <span style={{ color:C.green }}>disabled</span></div>
+          <div />
+          <div><span style={{ color:C.accent }}>cache:</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>l1_max_entries:</span> <span style={{ color:C.primary }}>2048</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>l1_ttl_secs:</span> <span style={{ color:C.primary }}>300</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>l2_max_entries:</span> <span style={{ color:C.primary }}>128</span></div>
+          <div />
+          <div><span style={{ color:C.accent }}>orchestrator:</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>mode:</span> <span style={{ color:C.green }}>sequential</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>max_workers:</span> <span style={{ color:C.primary }}>3</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>max_rounds:</span> <span style={{ color:C.primary }}>10</span></div>
+          <div />
+          <div><span style={{ color:C.accent }}>agent:</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>max_turns:</span> <span style={{ color:C.primary }}>50</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>max_tool_calls:</span> <span style={{ color:C.primary }}>30</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>token_budget:</span> <span style={{ color:C.primary }}>128000</span></div>
+          <div />
+          <div><span style={{ color:C.accent }}>audit:</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>enabled:</span> <span style={{ color:C.primary }}>true</span></div>
+          <div style={{ paddingLeft:16 }}><span style={{ color:C.cyan }}>path:</span> <span style={{ color:C.green }}>./audit.log</span></div>
+        </div>
+      </Card>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>安全护栏</div>
+          {[
+            { name:"PermissionACL", desc:"路径级访问控制" }, { name:"TokenBudget", desc:"Token 用量上限 (128K)" },
+            { name:"BashRiskGrading", desc:"5 级命令风险分类" }, { name:"HookEngine", desc:"YAML 配置式拦截器" },
+            { name:"ExecPolicy", desc:"命令执行白名单" }, { name:"WorkspaceGuard", desc:"工作区边界保护" },
+          ].map((g,i,arr) => (
+            <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 0", borderBottom: i<arr.length-1 ? `1px solid ${C.border}` : "none" }}>
+              <div style={{ width:36, height:20, borderRadius:10, backgroundColor:C.green, position:"relative", cursor:"pointer" }}>
+                <div style={{ width:16, height:16, borderRadius:"50%", backgroundColor:"#fff", position:"absolute", top:2, left:18 }} />
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{g.name}</div>
+                <div style={{ fontSize:11, color:C.textMuted }}>{g.desc}</div>
+              </div>
+            </div>
+          ))}
+        </Card>
+        <Card>
+          <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:16 }}>上下文压缩策略</div>
+          {[
+            { name:"Micro", desc:"最小压缩，保留完整上下文", threshold:"< 10 条", color:C.green },
+            { name:"Snip", desc:"截断旧工具结果，保留摘要", threshold:"10-20 条", color:C.cyan },
+            { name:"Chunked", desc:"分块压缩，按对话段切割", threshold:"20-30 条", color:C.accent },
+            { name:"Auto", desc:"自适应压缩，动态调整", threshold:"30-40 条", color:C.purple },
+            { name:"Reactive", desc:"响应式，接近上限时激进裁剪", threshold:"40-50 条", color:C.red },
+            { name:"Collapse", desc:"极限压缩，只保留系统提示+最近几轮", threshold:"> 50 条", color:C.red },
+          ].map((s,i,arr) => (
+            <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 0", borderBottom: i<arr.length-1 ? `1px solid ${C.border}` : "none" }}>
+              <div style={{ width:8, height:8, borderRadius:2, backgroundColor:s.color }} />
+              <div style={{ width:70, fontSize:13, fontWeight:700, color:s.color }}>{s.name}</div>
+              <div style={{ flex:1, fontSize:12, color:C.textSec }}>{s.desc}</div>
+              <Badge color={C.textMuted}>{s.threshold}</Badge>
+            </div>
+          ))}
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ==================== Main App ====================
+function App() {
+  const [page, setPage] = useState("dashboard");
+  const [hover, setHover] = useState(null);
+  const pages = { dashboard:DashboardPage, chat:ChatPage, orchestrator:OrchestratorPage, tools:ToolsPage, sessions:SessionsPage, audit:AuditPage, settings:SettingsPage };
+  const Page = pages[page];
+
+  return (
+    <div style={{ display:"flex", height:"100vh", backgroundColor:C.bg, overflow:"hidden" }}>
+      {/* Sidebar */}
+      <div style={{ width:220, flexShrink:0, backgroundColor:C.surface, borderRight:`1px solid ${C.border}`, display:"flex", flexDirection:"column" }}>
+        <div style={{ padding:"20px 16px", borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", gap:10 }}>
+          <div style={{ width:36, height:36, borderRadius:10, background:`linear-gradient(135deg, ${C.primary}, ${C.purple})`, display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <IconStar size={18} color="#fff" fill="#fff" />
+          </div>
+          <div>
+            <div style={{ fontSize:15, fontWeight:800, color:C.text, letterSpacing:0.5 }}>Orion</div>
+            <div style={{ fontSize:10, color:C.textMuted }}>Agent Framework</div>
+          </div>
+        </div>
+        <div style={{ flex:1, padding:"12px 8px", display:"flex", flexDirection:"column", gap:2 }}>
+          {navItems.map(item => {
+            const Ic = item.icon;
+            const isActive = page === item.id;
+            const isHover = hover === item.id;
+            return (
+              <button key={item.id} onClick={()=>setPage(item.id)} onMouseEnter={()=>setHover(item.id)} onMouseLeave={()=>setHover(null)}
+                style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px", borderRadius:8, border:"none", cursor:"pointer", textAlign:"left", width:"100%",
+                  backgroundColor: isActive ? C.primary+"20" : isHover ? C.hover : "transparent",
+                  color: isActive ? C.primaryLight : C.textSec, fontSize:13, fontWeight: isActive ? 600 : 400 }}>
+                <Ic size={16} color={isActive ? C.primaryLight : C.textSec} />
+                {item.label}
+                {isActive && <div style={{ marginLeft:"auto", width:6, height:6, borderRadius:"50%", backgroundColor:C.primaryLight }} />}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ padding:"12px 16px", borderTop:`1px solid ${C.border}`, fontSize:11, color:C.textMuted }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6 }}><IconRadio size={10} color={C.green} /><span>v0.1.0 · Rust 2021</span></div>
+          <div style={{ marginTop:4, display:"flex", alignItems:"center", gap:6 }}>
+            <span style={{ width:6, height:6, borderRadius:"50%", backgroundColor:C.green, display:"inline-block" }} />
+            <span>Tokio Runtime Active</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Main */}
+      <div style={{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" }}>
+        <div style={{ padding:"12px 24px", borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", justifyContent:"space-between", backgroundColor:C.surface }}>
+          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+            <span style={{ fontSize:14, fontWeight:600, color:C.text }}>{navItems.find(n=>n.id===page)?.label}</span>
+            <Badge color={C.green}>运行中</Badge>
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:16 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color:C.textMuted }}><IconCpu size={12} color={C.textMuted} /><span>deepseek-chat</span></div>
+            <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color:C.textMuted }}><IconGauge size={12} color={C.textMuted} /><span>Token: 48.2K / 128K</span></div>
+            <div style={{ width:80, height:4, borderRadius:2, backgroundColor:C.border, overflow:"hidden" }}>
+              <div style={{ width:"37%", height:"100%", backgroundColor:C.green, borderRadius:2 }} />
+            </div>
+          </div>
+        </div>
+        <div style={{ flex:1, overflowY:"auto", padding:24 }}>
+          <Page />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

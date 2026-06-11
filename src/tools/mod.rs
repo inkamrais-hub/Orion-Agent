@@ -183,11 +183,15 @@ impl Tool for ReadTool {
     }
 }
 
-/// 注册默认工具集 (run 和 chat 共用)
+/// 注册默认工具集 + 聚类信息
 ///
 /// 包含: Read, Write, Bash, Edit, SymbolSearch, FindCallers, ProjectMap,
-///       AskUser, Glob, Grep
+///       AskUser, Glob, Grep, Skeleton
+///
+/// 同时挂载 ClusterRegistry（工具聚类元数据 + sys_prompt_fragment），
+/// 使 definitions() 支持按聚类过滤，system prompt 可使用聚类描述。
 pub fn register_default_tools(tools: &mut registry::ToolRegistry) {
+    // 注册工具实例
     tools.register(ReadTool);
     tools.register(WriteTool);
     tools.register(BashTool);
@@ -199,6 +203,9 @@ pub fn register_default_tools(tools: &mut registry::ToolRegistry) {
     tools.register(glob_tool::GlobTool);
     tools.register(grep_tool::GrepTool);
     tools.register(skeleton_tool::SkeletonTool);
+
+    // 挂载聚类信息
+    tools.set_clusters(category::create_default_clusters());
 }
 
 /// 注册元工具（延迟装载模式专用）

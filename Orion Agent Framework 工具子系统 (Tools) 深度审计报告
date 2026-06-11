@@ -1,0 +1,244 @@
+本报告根据你的核心设计思想（工具三级分层：Agent 调用 / 工具类别抽象层 / 工具具体类 与 按需提示词注入以减少 Token 消耗）以及代码严格性校验要求，对 src/tools/ 目录下的所有工具组件进行了严苛的源码级审查。
+
+1. 架构设计断层：工具分类未与 LLM 动态按需绑定
+1.1 问题现状
+在 
+src/tools/category.rs
+ 中，代码优雅地实现了 ToolCategory 抽象层（包括 FileOpsCategory、SearchCategory 等），并在命令行初始化时调用了 categories.brief_list()。 但目前的核心 Loop 
+src/core/loop.rs
+ 与 LLM 交互时，完全绕过了这一抽象分类：
+
+Token 膨胀：系统在每次对话请求中，依然通过 tools.definitions() 提取所有 14+ 个工具的完整 JSON Schema 直接发送给大模型。
+设计矛盾：System Prompt 声明了“分类列表”（简短），但 LLM 面临的却依然是扁平扁塌的、密密麻麻的完整工具参数列表。这导致每个对话 turn 白白浪费了大量的 Context Token，与设计初衷（减少 Token 消耗）完全违背。
+1.2 巧妙的改进方案：动态工具发现模式 (Dynamic Tool Schema Injection)
+要真正实现你提出的“按需调用工具具体类”以节省 Token，建议引入一个二级动态装载架构：
+
+
+                    ┌──────────────────────────────────────────────┐
+                    │      System Prompt (仅包含简短类别 brief)      │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │   LLM 仅可见 1 个系统工具: `fetch_tool`       │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                                 [LLM 思考需要使用 grep]
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │ LLM 调用 `fetch_tool(name: "grep")`          │
+                    │ └─► 动态返回 grep 的具体 JSON Schema 参数    │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │ LLM 获知参数，正式调用 `grep(pattern: "...")` │
+                    └──────────────────────────────────────────────┘
+实现细节：
+默认隐藏具体 Schema：大模型启动时，LLM 注入的 tools 参数列表中仅包含 1 个根工具：fetch_tool_schema(tool_name: String)。
+System Prompt 引导：系统提示词中声明：“你拥有文件操作、命令执行等 6 大分类。你默认无法直接调用它们。如果你需要使用特定工具，请先调用 fetch_tool_schema 获取它的参数定义，然后即可在后续 turn 中直接使用该工具。”
+动态注册：在 Loop 循环中，一旦大模型调用了 fetch_tool_schema，框架将该工具的具体 Schema 注入到后续的 API tools 字段中。这样，大模型在不需要搜索、不需要写代码的会话中，完全不会接收到 GrepTool、EditTool 的冗长参数定义，能将初始 Token 压降 80% 以上。
+2. 具体工具安全漏洞与代码严格性审计 (Code Strictness & Vulnerabilities)
+2.1 [CRITICAL] multi_shell.rs (terminal 工具) 彻底绕过安全路径校验
+文件路径: 
+src/tools/multi_shell.rs
+安全漏洞: 我们为 BashTool 写了非常严密的 is_command_safe(cmd) 校验。但在多终端工具 MultiShellTool ("terminal") 中，其 execute 函数实现如下：
+rust
+
+async fn execute(&self, input: Value, _ctx: &ToolContext) -> crate::Result<ToolResult> {
+    // ...
+    let executor = MultiShellExecutor::new();
+    let output = executor.execute(command, shell, pre_input, timeout).await?; // 漏洞：完全没有调用安全拦截器！
+    // ...
+}
+严重后果: 大模型如果发现 bash 工具拦截了危险命令，它可以通过调用 terminal 工具（并将 shell 字段指定为 "bash" 或 "powershell"），完全绕过 Workspace 所有的防擦除、防越权路径保护，直接在宿主机上执行 rm -rf / 或写坏框架系统文件！
+修复建议: 在 MultiShellTool::execute 执行前，必须强制调用 crate::core::workspace::is_command_safe(command) 进行拦截。
+2.2 [CRITICAL] edit.rs (edit 工具) 换行符强制擦除 Bug
+文件路径: 
+src/tools/edit.rs
+逻辑缺陷: 在编辑文件进行精确匹配时，EditTool 进行了 CRLF 到 LF 的全局替换：
+rust
+
+// 读取文件内容
+let content = tokio::fs::read_to_string(path).await?;
+// 归一化 CRLF → LF 以便匹配
+let normalized = content.replace("\r\n", "\n");
+// ... 执行替换 ...
+let new_content = normalized.replace(&*old_normalized, new_string);
+// 写回文件
+tokio::fs::write(path, &new_content).await?;
+实际使用痛点: 在 Windows 环境下，项目文件通常是用 CRLF 换行符保存的。EditTool 在写回文件时，直接将整个文件的换行符强行刷成了 LF。 这会导致：
+Git 历史灾难：在代码版本控制中，这会导致整个文件每一行都被标记为被修改（Git Diff 爆炸），彻底破坏协作开发中的 Commit 历史。
+平台兼容破坏：一些 Windows 独有的脚本或批处理文件被强刷成 LF 后可能会执行报错。
+修复建议: 在读取文件时检测是否含有 \r\n，如果原文件是 CRLF，则在写回前将 new_content 重新转换为 CRLF 结构：
+rust
+
+let has_crlf = content.contains("\r\n");
+// ... 替换完成后 ...
+let final_content = if has_crlf { new_content.replace('\n', "\r\n") } else { new_content };
+tokio::fs::write(path, &final_content).await?;
+2.3 [HIGH] grep_tool.rs & glob_tool.rs 目录穿越与内存暴涨 (OOM) 隐患
+文件路径: 
+src/tools/grep_tool.rs
+ & 
+src/tools/glob_tool.rs
+漏洞与缺陷:
+越权目录穿越：这两个工具都接收 path 参数，并直接在代码中通过 std::path::Path::new(root) 创建路径。因为缺乏 Workspace 安全边界检查，大模型可以直接将 path 设置为 C:\Users\administrator 或 C:\Windows，借此读取宿主机上所有的敏感系统文件。
+同步阻塞与 OOM 风险：GrepTool 内部通过递归 read_dir 寻找文件，并对每个文件直接调用同步的 std::fs::read_to_string。
+线程挂起：在异步运行时中执行密集的同步磁盘 I/O 会直接卡死 Tokio 工作线程。
+内存崩溃 (OOM)：代码中虽然用 is_binary 排除了一些二进制扩展名。但如果工作区中包含一个非二进制的大型文本文件（如 5GB 的 production.log），read_to_string 会强行将整整 5GB 内容一次性载入内存，导致进程直接发生 OOM (Out Of Memory) 崩溃崩溃！
+修复建议:
+对传入的 path 必须通过 WorkspaceGuard::validate_path 进行边界合法性校验。
+grep 读取文件前，必须使用 fs::metadata 校验文件大小，限制单文件读取不得超过 10MB，或者使用流式 Reader（按行匹配）而非一次性 read_to_string。
+2.4 [MEDIUM] web_search.rs (联网搜索) 的 Panic 与长时延设计
+文件路径: 
+src/tools/web_search.rs
+逻辑缺陷:
+Panics 隐患：在代理模式初始化时，代码中包含：
+rust
+
+let make_client = |proxy: &Option<reqwest::Proxy>| {
+    // ...
+    builder.build().expect("failed to build reqwest client")
+};
+如果在并发高压下系统套接字耗尽，或者配置的 proxy_url 格式解析出错，.expect(...) 将会导致整个线程 panic，进而波及 Agent 任务的生命周期。
+高频连接重构开销：在 execute 被触发时，它每次都调用 self.build_manager()。这意味着每次大模型执行搜索，都需要重新解析代理、重新实例化 reqwest::Client。 reqwest 的 Client 内部维护了连接池（Keep-Alive）。每次重新创建 Client 会导致底层的 HTTP 连接池无法复用，每次搜索都需要重新进行 TCP + TLS 三次握手，极大地增加了联网搜索的延迟。
+修复建议:
+在 WebSearchTool 结构体初始化时一次性构建好复用的 reqwest::Client（用 Arc 包装），并在 execute 中直接复用该 Client，而不是每次临时 build_manager。
+将 .expect 换为 map_err 正常向上层传播错误。
+3. 终极组件整改清单 (对于你的本地 Sub-Agent)
+为了让你交接给本地 Agent 的修复指令万无一失，这里为你梳理出具体的代码修改规范：
+
+工具名称	对应文件	修复动作	期望输出
+edit	src/tools/edit.rs	1. 读取原文件检查是否包含 \r\n；
+2. 替换完成后，若原文件为 CRLF，则将写回的内容统一还原为 \r\n。	保持 Git Commit 历史干净，避免每一行都被打上换行符修改标记。
+terminal	src/tools/multi_shell.rs	1. 在 MultiShellTool::execute 首行添加对 crate::core::workspace::is_command_safe(command) 的调用并处理错误。	封堵大模型通过选择 terminal 工具绕过 bash 安全审查的后门。
+grep / glob	src/tools/grep_tool.rs
+src/tools/glob_tool.rs	1. 用 WorkspaceGuard 对传入路径强校验；
+2. 对 grep 添加单文件 10MB 大小限制，超限则跳过或按流分批读取。	防止 Agent 爬取宿主机敏感系统文件，防止大文本日志引起 OOM 崩溃。
+web_search	src/tools/web_search.rs	1. 将 reqwest::Client 实例化移至 WebSearchTool::new 中，并使用 Arc 缓存；
+2. 消除 .expect 崩溃点。	显著降低网络握手时延，提高网络搜索的稳定度。
+本报告根据你的核心设计思想（工具三级分层：Agent 调用 / 工具类别抽象层 / 工具具体类 与 按需提示词注入以减少 Token 消耗）以及代码严格性校验要求，对 src/tools/ 目录下的所有工具组件进行了严苛的源码级审查。
+
+1. 架构设计断层：工具分类未与 LLM 动态按需绑定
+1.1 问题现状
+在 
+src/tools/category.rs
+ 中，代码优雅地实现了 ToolCategory 抽象层（包括 FileOpsCategory、SearchCategory 等），并在命令行初始化时调用了 categories.brief_list()。 但目前的核心 Loop 
+src/core/loop.rs
+ 与 LLM 交互时，完全绕过了这一抽象分类：
+
+Token 膨胀：系统在每次对话请求中，依然通过 tools.definitions() 提取所有 14+ 个工具的完整 JSON Schema 直接发送给大模型。
+设计矛盾：System Prompt 声明了“分类列表”（简短），但 LLM 面临的却依然是扁平扁塌的、密密麻麻的完整工具参数列表。这导致每个对话 turn 白白浪费了大量的 Context Token，与设计初衷（减少 Token 消耗）完全违背。
+1.2 巧妙的改进方案：动态工具发现模式 (Dynamic Tool Schema Injection)
+要真正实现你提出的“按需调用工具具体类”以节省 Token，建议引入一个二级动态装载架构：
+
+
+                    ┌──────────────────────────────────────────────┐
+                    │      System Prompt (仅包含简短类别 brief)      │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │   LLM 仅可见 1 个系统工具: `fetch_tool`       │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                                 [LLM 思考需要使用 grep]
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │ LLM 调用 `fetch_tool(name: "grep")`          │
+                    │ └─► 动态返回 grep 的具体 JSON Schema 参数    │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │ LLM 获知参数，正式调用 `grep(pattern: "...")` │
+                    └──────────────────────────────────────────────┘
+实现细节：
+默认隐藏具体 Schema：大模型启动时，LLM 注入的 tools 参数列表中仅包含 1 个根工具：fetch_tool_schema(tool_name: String)。
+System Prompt 引导：系统提示词中声明：“你拥有文件操作、命令执行等 6 大分类。你默认无法直接调用它们。如果你需要使用特定工具，请先调用 fetch_tool_schema 获取它的参数定义，然后即可在后续 turn 中直接使用该工具。”
+动态注册：在 Loop 循环中，一旦大模型调用了 fetch_tool_schema，框架将该工具的具体 Schema 注入到后续的 API tools 字段中。这样，大模型在不需要搜索、不需要写代码的会话中，完全不会接收到 GrepTool、EditTool 的冗长参数定义，能将初始 Token 压降 80% 以上。
+2. 具体工具安全漏洞与代码严格性审计 (Code Strictness & Vulnerabilities)
+2.1 [CRITICAL] multi_shell.rs (terminal 工具) 彻底绕过安全路径校验
+文件路径: 
+src/tools/multi_shell.rs
+安全漏洞: 我们为 BashTool 写了非常严密的 is_command_safe(cmd) 校验。但在多终端工具 MultiShellTool ("terminal") 中，其 execute 函数实现如下：
+rust
+
+async fn execute(&self, input: Value, _ctx: &ToolContext) -> crate::Result<ToolResult> {
+    // ...
+    let executor = MultiShellExecutor::new();
+    let output = executor.execute(command, shell, pre_input, timeout).await?; // 漏洞：完全没有调用安全拦截器！
+    // ...
+}
+严重后果: 大模型如果发现 bash 工具拦截了危险命令，它可以通过调用 terminal 工具（并将 shell 字段指定为 "bash" 或 "powershell"），完全绕过 Workspace 所有的防擦除、防越权路径保护，直接在宿主机上执行 rm -rf / 或写坏框架系统文件！
+修复建议: 在 MultiShellTool::execute 执行前，必须强制调用 crate::core::workspace::is_command_safe(command) 进行拦截。
+2.2 [CRITICAL] edit.rs (edit 工具) 换行符强制擦除 Bug
+文件路径: 
+src/tools/edit.rs
+逻辑缺陷: 在编辑文件进行精确匹配时，EditTool 进行了 CRLF 到 LF 的全局替换：
+rust
+
+// 读取文件内容
+let content = tokio::fs::read_to_string(path).await?;
+// 归一化 CRLF → LF 以便匹配
+let normalized = content.replace("\r\n", "\n");
+// ... 执行替换 ...
+let new_content = normalized.replace(&*old_normalized, new_string);
+// 写回文件
+tokio::fs::write(path, &new_content).await?;
+实际使用痛点: 在 Windows 环境下，项目文件通常是用 CRLF 换行符保存的。EditTool 在写回文件时，直接将整个文件的换行符强行刷成了 LF。 这会导致：
+Git 历史灾难：在代码版本控制中，这会导致整个文件每一行都被标记为被修改（Git Diff 爆炸），彻底破坏协作开发中的 Commit 历史。
+平台兼容破坏：一些 Windows 独有的脚本或批处理文件被强刷成 LF 后可能会执行报错。
+修复建议: 在读取文件时检测是否含有 \r\n，如果原文件是 CRLF，则在写回前将 new_content 重新转换为 CRLF 结构：
+rust
+
+let has_crlf = content.contains("\r\n");
+// ... 替换完成后 ...
+let final_content = if has_crlf { new_content.replace('\n', "\r\n") } else { new_content };
+tokio::fs::write(path, &final_content).await?;
+2.3 [HIGH] grep_tool.rs & glob_tool.rs 目录穿越与内存暴涨 (OOM) 隐患
+文件路径: 
+src/tools/grep_tool.rs
+ & 
+src/tools/glob_tool.rs
+漏洞与缺陷:
+越权目录穿越：这两个工具都接收 path 参数，并直接在代码中通过 std::path::Path::new(root) 创建路径。因为缺乏 Workspace 安全边界检查，大模型可以直接将 path 设置为 C:\Users\administrator 或 C:\Windows，借此读取宿主机上所有的敏感系统文件。
+同步阻塞与 OOM 风险：GrepTool 内部通过递归 read_dir 寻找文件，并对每个文件直接调用同步的 std::fs::read_to_string。
+线程挂起：在异步运行时中执行密集的同步磁盘 I/O 会直接卡死 Tokio 工作线程。
+内存崩溃 (OOM)：代码中虽然用 is_binary 排除了一些二进制扩展名。但如果工作区中包含一个非二进制的大型文本文件（如 5GB 的 production.log），read_to_string 会强行将整整 5GB 内容一次性载入内存，导致进程直接发生 OOM (Out Of Memory) 崩溃崩溃！
+修复建议:
+对传入的 path 必须通过 WorkspaceGuard::validate_path 进行边界合法性校验。
+grep 读取文件前，必须使用 fs::metadata 校验文件大小，限制单文件读取不得超过 10MB，或者使用流式 Reader（按行匹配）而非一次性 read_to_string。
+2.4 [MEDIUM] web_search.rs (联网搜索) 的 Panic 与长时延设计
+文件路径: 
+src/tools/web_search.rs
+逻辑缺陷:
+Panics 隐患：在代理模式初始化时，代码中包含：
+rust
+
+let make_client = |proxy: &Option<reqwest::Proxy>| {
+    // ...
+    builder.build().expect("failed to build reqwest client")
+};
+如果在并发高压下系统套接字耗尽，或者配置的 proxy_url 格式解析出错，.expect(...) 将会导致整个线程 panic，进而波及 Agent 任务的生命周期。
+高频连接重构开销：在 execute 被触发时，它每次都调用 self.build_manager()。这意味着每次大模型执行搜索，都需要重新解析代理、重新实例化 reqwest::Client。 reqwest 的 Client 内部维护了连接池（Keep-Alive）。每次重新创建 Client 会导致底层的 HTTP 连接池无法复用，每次搜索都需要重新进行 TCP + TLS 三次握手，极大地增加了联网搜索的延迟。
+修复建议:
+在 WebSearchTool 结构体初始化时一次性构建好复用的 reqwest::Client（用 Arc 包装），并在 execute 中直接复用该 Client，而不是每次临时 build_manager。
+将 .expect 换为 map_err 正常向上层传播错误。
+3. 终极组件整改清单 (对于你的本地 Sub-Agent)
+为了让你交接给本地 Agent 的修复指令万无一失，这里为你梳理出具体的代码修改规范：
+
+工具名称	对应文件	修复动作	期望输出
+edit	src/tools/edit.rs	1. 读取原文件检查是否包含 \r\n；
+2. 替换完成后，若原文件为 CRLF，则将写回的内容统一还原为 \r\n。	保持 Git Commit 历史干净，避免每一行都被打上换行符修改标记。
+terminal	src/tools/multi_shell.rs	1. 在 MultiShellTool::execute 首行添加对 crate::core::workspace::is_command_safe(command) 的调用并处理错误。	封堵大模型通过选择 terminal 工具绕过 bash 安全审查的后门。
+grep / glob	src/tools/grep_tool.rs
+src/tools/glob_tool.rs	1. 用 WorkspaceGuard 对传入路径强校验；
+2. 对 grep 添加单文件 10MB 大小限制，超限则跳过或按流分批读取。	防止 Agent 爬取宿主机敏感系统文件，防止大文本日志引起 OOM 崩溃。
+web_search	src/tools/web_search.rs	1. 将 reqwest::Client 实例化移至 WebSearchTool::new 中，并使用 Arc 缓存；
+2. 消除 .expect 崩溃点。	显著降低网络握手时延，提高网络搜索的稳定度。
