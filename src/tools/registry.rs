@@ -197,7 +197,37 @@ impl ToolRegistry {
         // ── 后置拦截器：保存快照到 SQLite ──
         if (name == "write" || name == "edit") && !result.is_error {
             if let Some(ref path_str) = snapshot_path {
-                save_file_snapshot(ctx, name, path_str, content_before, self.store.as_deref()).await;
+                save_file_snapshot(ctx, name, path_str, content_before.as_deref(), self.store.as_deref()).await;
+
+                // ── 行级快照: 调用 SnapshotStore.create_snapshot() ──
+                if let Ok(content_after) = tokio::fs::read_to_string(path_str).await {
+                    let workspace = std::env::current_dir().unwrap_or_default();
+                    let mut snapshot_store = crate::tools::code_intelligence::file_snapshot::SnapshotStore::new(&workspace);
+                    let _ = snapshot_store.init();
+                    let _ = snapshot_store.load_from_disk();
+                    let old_content = content_before.as_deref().unwrap_or("");
+                    let snapshot_result = snapshot_store.create_snapshot(
+                        path_str,
+                        old_content,
+                        &content_after,
+                        &ctx.session_id,
+                        &ctx.agent_id,
+                        Some(format!("{} tool operation", name)),
+                    );
+                    match snapshot_result {
+                        crate::tools::code_intelligence::file_snapshot::SnapshotResult::RiskyChange(entry) => {
+                            tracing::warn!(
+                                file = %path_str,
+                                ratio = %format!("{:.0}%", entry.change_ratio * 100.0),
+                                "Risky file change detected (>80% lines changed)"
+                            );
+                        }
+                        crate::tools::code_intelligence::file_snapshot::SnapshotResult::Created(_) => {
+                            tracing::debug!(file = %path_str, "File snapshot created");
+                        }
+                        crate::tools::code_intelligence::file_snapshot::SnapshotResult::SkippedUnchanged => {}
+                    }
+                }
             }
         }
 
@@ -274,7 +304,7 @@ async fn save_file_snapshot(
     ctx: &ToolContext,
     tool_name: &str,
     target_path: &str,
-    content_before: Option<String>,
+    content_before: Option<&str>,
     store: Option<&crate::session::UnifiedStore>,
 ) {
     // 跳过空 session（非 API 调用场景可能没有 session_id）
@@ -290,7 +320,7 @@ async fn save_file_snapshot(
             turn_index: ctx.turn_number as i64,
             tool_name: tool_name.to_string(),
             target_path: target_path.to_string(),
-            content_before,
+            content_before: content_before.map(|s| s.to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 

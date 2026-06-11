@@ -45,6 +45,24 @@ impl Tool for SubAgentTool {
         let max_turns = input["max_turns"].as_u64().unwrap_or(10);
         let max_tool_calls = input["max_tool_calls"].as_u64().unwrap_or(10);
 
+        // Git sandbox isolation: create a temporary branch for the sub-agent
+        let working_dir = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".into());
+        let sandbox = crate::session::sandbox::GitSandbox::new(&working_dir);
+        let sandbox_branch = if sandbox.is_git_repo().await {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            match sandbox.create_branch(&session_id, "sub_agent").await {
+                Ok(branch) => Some(branch),
+                Err(e) => {
+                    tracing::warn!("Failed to create sandbox branch: {}, running without isolation", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Create provider based on model policy
         let (model, provider) = match &self.model_policy {
             SubAgentModelPolicy::Inherit => {
@@ -109,7 +127,7 @@ impl Tool for SubAgentTool {
             Default::default(),
         ).await;
 
-        match result {
+        let tool_result = match result {
             crate::core::r#loop::LoopOutcome::Completed { message, .. } => {
                 Ok(ToolResult { content: message, is_error: false, metadata: None })
             }
@@ -120,6 +138,24 @@ impl Tool for SubAgentTool {
                 Ok(ToolResult { content: format!("[Sub-agent error] {}", message), is_error: true, metadata: None })
             }
             _ => Ok(ToolResult { content: "Sub-agent did not complete".into(), is_error: true, metadata: None }),
+        };
+
+        // Merge sandbox branch back and clean up
+        if let Some(branch) = sandbox_branch {
+            match sandbox.merge_branch(&branch).await {
+                Ok(crate::session::sandbox::MergeResult::Success { .. }) => {
+                    tracing::info!("Sandbox branch merged successfully");
+                }
+                Ok(crate::session::sandbox::MergeResult::Conflict { files, .. }) => {
+                    tracing::warn!("Sandbox merge conflicts in: {:?}", files);
+                }
+                Err(e) => {
+                    tracing::warn!("Sandbox merge failed: {}", e);
+                }
+            }
+            let _ = sandbox.cleanup_branch(&branch).await;
         }
+
+        tool_result
     }
 }
