@@ -30,6 +30,8 @@ pub struct ChatState {
     pub thinking: bool,
     /// 思考深度: low/medium/high/max/xhigh
     pub reasoning_effort: String,
+    /// 当前工作目录
+    pub working_dir: String,
 }
 
 /// 注册全部工具
@@ -70,7 +72,7 @@ async fn create_session_helper(store: &Arc<UnifiedStore>, model: &str) -> crate:
 }
 
 /// 启动对话
-pub async fn run(config: OrionConfig) -> crate::Result<()> {
+pub async fn run(config: OrionConfig, working_dir: String) -> crate::Result<()> {
     let model_config = config.active_model();
     let store = UnifiedStore::open().await?;
 
@@ -99,7 +101,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
     // 连接配置中的 MCP server 并注入工具
     crate::tools::mcp_init::init_mcp_tools(&config, &mut tools).await;
 
-    let memory = SessionMemory::load();
+    let memory = SessionMemory::for_project(&working_dir);
 
     let mut state = ChatState {
         store,
@@ -112,6 +114,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
         pending_images: Vec::new(),
         thinking: model_config.thinking,
         reasoning_effort: "medium".into(),
+        working_dir,
     };
 
     // 构建 system prompt，注入 memory 上下文
@@ -180,6 +183,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
             &state.store, &state.current_session, input, &state.model,
             &system_prompt, None, images,
             state.thinking, &state.reasoning_effort,
+            Some(&state.working_dir),
         ).await {
             Ok(response) => {
                 // 从本轮对话中提取记忆
@@ -243,6 +247,7 @@ async fn handle_command(
             eprintln!("  /resume <id>       切换会话");
             eprintln!("  /drop <id>         删除会话");
             eprintln!("  /clear             清屏");
+            eprintln!("  /cd [path]         查看/切换工作目录");
             eprintln!("  /model [name]      查看/切换模型");
             eprintln!("  /think             开关思考模式");
             eprintln!("  /think-level [lvl] 设置思考深度 (low/medium/high/max/xhigh)");
@@ -300,6 +305,34 @@ async fn handle_command(
             let count = state.pending_images.len();
             state.pending_images.clear();
             eprintln!("已清空 {} 张待发送图片", count);
+        }
+        "/cd" => {
+            match arg {
+                Some(path) if !path.is_empty() => {
+                    let new_dir = std::path::Path::new(path);
+                    if !new_dir.exists() {
+                        return CmdResult::Error(format!("目录不存在: {}", path));
+                    }
+                    if !new_dir.is_dir() {
+                        return CmdResult::Error(format!("不是目录: {}", path));
+                    }
+                    match std::env::set_current_dir(new_dir) {
+                        Ok(()) => {
+                            let new_cwd = std::env::current_dir()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|_| path.to_string());
+                            state.working_dir = new_cwd.clone();
+                            // 重新加载项目级记忆
+                            state.memory = SessionMemory::for_project(&new_cwd);
+                            eprintln!("工作目录: {}", new_cwd);
+                        }
+                        Err(e) => return CmdResult::Error(format!("无法切换目录: {}", e)),
+                    }
+                }
+                _ => {
+                    eprintln!("工作目录: {}", state.working_dir);
+                }
+            }
         }
         "/new" => {
             match create_session_helper(&state.store, &state.model).await {

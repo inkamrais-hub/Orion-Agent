@@ -284,6 +284,7 @@ impl Agent {
                 max_output_tokens: resolve_max_output_tokens(&self.config.reasoning_effort),
             },
             exec_mode: crate::core::exec_mode::ExecMode::default(),
+            working_dir: None,
         }
     }
 
@@ -368,6 +369,7 @@ impl Agent {
                     max_output_tokens: resolve_max_output_tokens(&reasoning_effort),
                 },
                 exec_mode: crate::core::exec_mode::ExecMode::default(),
+                working_dir: None,
             };
 
             let event_tx = tx.clone();

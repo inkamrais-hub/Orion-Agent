@@ -129,12 +129,17 @@ pub struct WorkspaceGuard {
 }
 
 impl WorkspaceGuard {
-    pub fn new(_workspace_root: PathBuf) -> Self {
-        // 框架根目录 = 当前可执行文件所在目录
-        let framework_root = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    pub fn new(workspace_root: PathBuf) -> Self {
+        // 使用传入的 workspace_root 作为框架根目录
+        let framework_root = if workspace_root.as_os_str().is_empty() {
+            // 回退: 如果传入空路径，使用当前可执行文件所在目录
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        } else {
+            workspace_root
+        };
         
         Self { framework_root }
     }

@@ -66,45 +66,27 @@ impl GatewayContext {
     }
 }
 
-/// 启动上层系统 — 显示菜单选择 CLI/WebUI
-pub async fn run_gateway() -> crate::Result<()> {
+/// 启动上层系统 — 默认启动 TUI 交互模式
+///
+/// `workspace` 为可选的工作目录路径。`None` 时使用当前目录。
+pub async fn run_gateway(workspace: Option<String>) -> crate::Result<()> {
     crate::logging::init_logging();
     log_info!("gateway", "Orion Agent 启动中...");
 
     let config = crate::config::OrionConfig::load();
 
-    let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let working_dir = workspace.clone().unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".into())
+    });
+
+    let workspace_root = std::path::PathBuf::from(&working_dir);
     crate::core::workspace::init_workspace_guard(workspace_root.clone()).await;
 
-    // 显示选择菜单
-    println!("╔══════════════════════════════════════╗");
-    println!("║        Orion Agent v{}             ║", env!("CARGO_PKG_VERSION"));
-    println!("╠══════════════════════════════════════╣");
-    println!("║                                      ║");
-    println!("║  [1] CLI   终端交互模式 (默认)        ║");
-    println!("║  [2] WebUI 浏览器界面                 ║");
-    println!("║                                      ║");
-    println!("╚══════════════════════════════════════╝");
-    print!("> ");
-    use std::io::Write;
-    std::io::stdout().flush().ok();
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).ok();
-    let choice = input.trim();
-
-    match choice {
-        "2" => {
-            // WebUI 模式 → 启动 WebSocket API
-            log_info!("gateway", "启动 WebUI 模式...");
-            commands::route_command("api", vec![], GatewayContext::new(config)).await
-        }
-        _ => {
-            // CLI 模式 → 启动交互式对话
-            log_info!("gateway", "启动 CLI 模式...");
-            commands::route_command("chat", vec![], GatewayContext::new(config)).await
-        }
-    }
+    // 默认启动 TUI 模式
+    log_info!("gateway", "启动 TUI 模式...");
+    crate::cli::tui::run_tui(config, Some(working_dir)).await
 }
 
 /// 公共执行函数：执行单次任务
@@ -198,6 +180,7 @@ pub async fn run_task_once(
             max_output_tokens: model_config.max_tokens.unwrap_or(4096),
         },
         exec_mode: crate::core::exec_mode::ExecMode::default(),
+        working_dir: std::env::current_dir().map(|p| p.display().to_string()).ok(),
     };
 
     let outcome = crate::core::r#loop::run_simple_loop(

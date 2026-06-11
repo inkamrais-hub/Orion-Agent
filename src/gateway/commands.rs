@@ -46,7 +46,7 @@ pub async fn route_command(
         (cmd.handler)(args, ctx).await
     } else {
         if command.is_empty() {
-            crate::cli::chat::run(ctx.config).await
+            crate::cli::chat::run(ctx.config, ctx.working_dir).await
         } else {
             Err(crate::Error::Config(format!("未知命令: {}", command)))
         }
@@ -61,7 +61,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         description: "启动交互式对话".into(),
         handler: Box::new(|_args, ctx| {
             Box::pin(async move {
-                crate::cli::chat::run(ctx.config).await
+                crate::cli::chat::run(ctx.config, ctx.working_dir).await
             })
         }),
     });

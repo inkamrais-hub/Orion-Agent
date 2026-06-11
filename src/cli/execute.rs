@@ -53,6 +53,9 @@ pub fn build_system_prompt_static() -> String {
     prompt.push_str(&categories.brief_list());
     prompt.push('\n');
 
+    // ── 动态上下文 (CWD, OS, Shell) ──
+    prompt.push_str(&build_dynamic_context());
+
     prompt
 }
 
@@ -151,6 +154,7 @@ pub async fn execute_turn(
     images: Option<Vec<crate::core::provider::ContentBlock>>,
     thinking: bool,
     reasoning_effort: &str,
+    working_dir: Option<&str>,
 ) -> crate::Result<String> {
     let history = store.get_transcripts(session_id).await.unwrap_or_default();
 
@@ -196,6 +200,7 @@ pub async fn execute_turn(
             max_output_tokens,
         },
         exec_mode: crate::core::exec_mode::ExecMode::default(),
+        working_dir: working_dir.map(|s| s.to_string()),
     };
     let outcome = run_simple_loop(
         provider, tools, cache, &loop_config, user_input,

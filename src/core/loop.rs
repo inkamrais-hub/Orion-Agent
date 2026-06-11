@@ -408,6 +408,8 @@ pub struct SimpleLoopConfig {
     pub model_caps: ModelCaps,
     /// 执行模式
     pub exec_mode: crate::core::exec_mode::ExecMode,
+    /// 工作目录 (传递给 ToolExecutorConfig)
+    pub working_dir: Option<String>,
 }
 
 impl Default for SimpleLoopConfig {
@@ -422,6 +424,7 @@ impl Default for SimpleLoopConfig {
             session_id: uuid::Uuid::new_v4().to_string(),
             model_caps: ModelCaps::default(),
             exec_mode: crate::core::exec_mode::ExecMode::default(),
+            working_dir: None,
         }
     }
 }
@@ -798,6 +801,10 @@ pub async fn run_simple_loop<'a>(
         let exec_config = crate::core::tool_executor::ToolExecutorConfig::basic(
             config.session_id.clone(), config.agent_id.clone(), registry.clone(),
         );
+        let exec_config = crate::core::tool_executor::ToolExecutorConfig {
+            working_dir: config.working_dir.clone(),
+            ..exec_config
+        };
         let all_readonly = crate::core::tool_executor::are_tools_readonly(&acc_tools);
 
         if all_readonly && acc_tools.len() > 1 {
@@ -863,11 +870,15 @@ pub async fn run_simple_loop<'a>(
                 let inp = input.clone();
                 let turn_for_task = state.turn();
                 let registry_clone = registry.clone();
+                let working_dir_for_task = config.working_dir.clone();
 
                 handles.push(async move {
-                    let ec = crate::core::tool_executor::ToolExecutorConfig::basic(
-                        config.session_id.clone(), config.agent_id.clone(), registry_clone,
-                    );
+                    let ec = crate::core::tool_executor::ToolExecutorConfig {
+                        working_dir: working_dir_for_task,
+                        ..crate::core::tool_executor::ToolExecutorConfig::basic(
+                            config.session_id.clone(), config.agent_id.clone(), registry_clone,
+                        )
+                    };
                     let output = crate::core::tool_executor::ToolExecutor::execute_single_tool(
                         tools, cache, &ec, &tn, &inp, turn_for_task,
                     ).await;

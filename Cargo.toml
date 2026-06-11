@@ -44,6 +44,10 @@ base64 = "0.22"
 axum = { version = "0.7", optional = true }
 tower-http = { version = "0.5", features = ["fs"], optional = true }
 
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
 # Web Search
 web-search = { path = "../web" }
 
