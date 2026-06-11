@@ -130,11 +130,12 @@ pub async fn run_task_once(
         ));
     }
 
-    // 创建 Provider
+    // 创建 Provider (根据 config.provider 字段路由)
+    // 注: api_key 已在上方验证，factory 会自动从 config 或 env 获取
+    let mut mc = model_config.clone();
+    mc.api_key = Some(api_key); // 确保 api_key 传入
     let provider: Box<dyn crate::core::provider::Provider> =
-        Box::new(crate::core::providers::openai_compat::OpenAICompatProvider::new(
-            &model_config.endpoint, &api_key, &model_config.name,
-        ));
+        crate::core::providers::create_provider(&mc);
     let provider = std::sync::Arc::from(provider);
 
     // 注册工具

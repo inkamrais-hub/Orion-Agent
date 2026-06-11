@@ -52,28 +52,28 @@ impl Tool for SubAgentTool {
                 let app_config = crate::config::OrionConfig::load_cached();
                 let model_config = app_config.active_model();
 
-                let api_key = model_config.api_key.clone()
-                    .filter(|k| !k.is_empty())
-                    .or_else(|| std::env::var("LLM_API_KEY").ok())
-                    .unwrap_or_default();
-
-                let provider: Box<dyn crate::core::provider::Provider> = Box::new(
-                    crate::core::providers::openai_compat::OpenAICompatProvider::new(
-                        &model_config.endpoint, &api_key, &model_config.name,
-                    ),
-                );
+                let provider: Box<dyn crate::core::provider::Provider> =
+                    crate::core::providers::create_provider(&model_config);
                 (model_config.name.clone(), provider)
             }
             SubAgentModelPolicy::Custom { model, endpoint, api_key } => {
-                let key = api_key.clone()
-                    .filter(|k| !k.is_empty())
-                    .or_else(|| std::env::var("LLM_API_KEY").ok())
-                    .unwrap_or_default();
-                let provider: Box<dyn crate::core::provider::Provider> = Box::new(
-                    crate::core::providers::openai_compat::OpenAICompatProvider::new(
-                        endpoint, &key, model,
-                    ),
-                );
+                // 构建临时 ModelConfig 走统一工厂
+                let custom_config = crate::model::ModelConfig {
+                    name: model.clone(),
+                    api_model: None,
+                    provider: "openai".into(), // Custom 策略默认 OpenAI 兼容
+                    endpoint: endpoint.clone(),
+                    api_key: api_key.clone(),
+                    max_tokens: None,
+                    modalities: vec!["text".into()],
+                    thinking: false,
+                    prompt_cache: false,
+                    max_input_tokens: None,
+                    proxy: None,
+                    timeout_secs: 120,
+                };
+                let provider: Box<dyn crate::core::provider::Provider> =
+                    crate::core::providers::create_provider(&custom_config);
                 (model.clone(), provider)
             }
         };

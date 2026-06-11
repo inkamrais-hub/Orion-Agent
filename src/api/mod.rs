@@ -33,7 +33,7 @@ use crate::session::UnifiedStore;
 use crate::config::OrionConfig;
 use crate::core::agent::{Agent, AgentEvent};
 use crate::core::provider::Provider;
-use crate::core::providers::openai_compat::OpenAICompatProvider;
+use crate::core::providers;
 use crate::tools::registry::ToolRegistry;
 
 // ============================================================
@@ -548,13 +548,8 @@ async fn build_agent_from_config(
         .or_else(|| app_config.models.first())
         .ok_or_else(|| crate::Error::Config("No models configured".into()))?;
 
-    // 2. 创建 Provider
-    let api_key = model_config.api_key.as_deref().unwrap_or("");
-    let provider: Arc<dyn Provider> = Arc::new(OpenAICompatProvider::new(
-        &model_config.endpoint,
-        api_key,
-        &model_config.name,
-    ));
+    // 2. 创建 Provider (根据 config.provider 字段路由)
+    let provider: Arc<dyn Provider> = Arc::from(providers::create_provider(model_config));
 
     // 3. 按 tools_json 选择性注册内置工具
     let mut tools = ToolRegistry::new();

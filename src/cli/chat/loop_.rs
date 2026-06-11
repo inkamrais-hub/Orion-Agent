@@ -8,7 +8,7 @@ use crate::cli::execute::execute_turn;
 use crate::config::OrionConfig;
 use crate::core::cache::GlobalCache;
 use crate::core::provider::Provider;
-use crate::core::providers::openai_compat::OpenAICompatProvider;
+use crate::core::providers;
 use crate::session::memory::{extract_memories, SessionMemory};
 use crate::session::UnifiedStore;
 use crate::tools::a2a_message::{ListPeersTool, SendMessageTool};
@@ -92,17 +92,7 @@ pub async fn run(config: OrionConfig) -> crate::Result<()> {
         id
     };
 
-    // API Key: 配置 > 环境变量
-    let api_key = model_config.api_key.clone()
-        .filter(|k| !k.is_empty())
-        .or_else(|| std::env::var("LLM_API_KEY").ok())
-        .unwrap_or_default();
-
-    let provider: Box<dyn Provider> = Box::new(OpenAICompatProvider::new(
-        &model_config.endpoint,
-        &api_key,
-        &model_config.name,
-    ));
+    let provider: Box<dyn Provider> = providers::create_provider(&model_config);
 
     let (mut tools, cache) = register_all_tools(&config);
 
@@ -418,19 +408,9 @@ async fn handle_command(
                     // 切换模型
                     let config = OrionConfig::load();
                     if let Some(model_config) = config.models.iter().find(|m| m.name == model_name) {
-                        // 创建新的 Provider
-                        let api_key = model_config.api_key.clone()
-                            .filter(|k| !k.is_empty())
-                            .or_else(|| std::env::var("LLM_API_KEY").ok())
-                            .unwrap_or_default();
-                        if api_key.is_empty() {
-                            return CmdResult::Error(format!("模型 '{}' 未配置 API Key", model_name));
-                        }
-                        let new_provider: Box<dyn crate::core::provider::Provider> = Box::new(
-                            crate::core::providers::openai_compat::OpenAICompatProvider::new(
-                                &model_config.endpoint, &api_key, &model_config.name,
-                            ),
-                        );
+                        // 创建新的 Provider (根据 config.provider 字段路由)
+                        let new_provider: Box<dyn crate::core::provider::Provider> =
+                            crate::core::providers::create_provider(model_config);
                         state.provider = new_provider;
                         state.model = model_config.name.clone();
                         eprintln!("✓ 已切换到: {}", model_name);

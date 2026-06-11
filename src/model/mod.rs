@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 pub struct ModelConfig {
     /// 模型名称 (如 "deepseek-chat", "qwen-plus")
     pub name: String,
+    /// API 模型标识 (可选, 当 name 与 API 实际 model 不同时使用)
+    /// 例如: name="ds-anthropic-flash" 但 api_model="deepseek-v4-flash"
+    #[serde(default)]
+    pub api_model: Option<String>,
     /// Provider 类型 (如 "openai-compat", "anthropic")
     #[serde(default = "default_provider")]
     pub provider: String,
@@ -50,6 +54,7 @@ impl std::fmt::Debug for ModelConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModelConfig")
             .field("name", &self.name)
+            .field("api_model", &self.api_model)
             .field("provider", &self.provider)
             .field("endpoint", &self.endpoint)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
@@ -68,6 +73,7 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             name: "deepseek-chat".into(),
+            api_model: None,
             provider: "openai".into(),
             endpoint: "https://api.deepseek.com".into(),
             api_key: None,
@@ -86,6 +92,7 @@ impl ModelConfig {
     /// 默认模型配置 (用于 fallback)
     pub const DEFAULT: ModelConfig = ModelConfig {
         name: String::new(),
+        api_model: None,
         provider: String::new(),
         endpoint: String::new(),
         api_key: None,
@@ -97,6 +104,11 @@ impl ModelConfig {
         proxy: None,
         timeout_secs: 120,
     };
+
+    /// 获取发送给 API 的模型标识 (优先使用 api_model, 否则使用 name)
+    pub fn effective_model(&self) -> &str {
+        self.api_model.as_deref().unwrap_or(&self.name)
+    }
 
     /// 是否支持指定模态
     pub fn supports_modality(&self, modality: &str) -> bool {

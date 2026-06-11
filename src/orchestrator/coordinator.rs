@@ -166,18 +166,8 @@ impl Coordinator {
             max_tool_calls: 30,
         };
 
-        let api_key = model_config.api_key.clone()
-            .filter(|k| !k.is_empty())
-            .or_else(|| std::env::var("LLM_API_KEY").ok())
-            .unwrap_or_default();
-
-        let provider: Box<dyn Provider> = Box::new(
-            crate::core::providers::openai_compat::OpenAICompatProvider::new(
-                &model_config.endpoint,
-                &api_key,
-                &config.model,
-            ),
-        );
+        let provider: Box<dyn Provider> =
+            crate::core::providers::create_provider(&model_config);
 
         // Clone 共享工具注册表，子 Worker 自动继承全部工具
         let tools = self.tools.clone();

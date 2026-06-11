@@ -63,6 +63,7 @@ impl AnthropicProvider {
                         match block {
                             ContentBlock::Text { text } => {
                                 blocks.push(AnthropicContentBlock::Text {
+                                    type_field: "text".to_string(),
                                     text: text.clone(),
                                     cache_control: None,
                                 });
@@ -80,6 +81,7 @@ impl AnthropicProvider {
                                     type_field: "tool_result".to_string(),
                                     tool_use_id: tool_call_id.clone(),
                                     content: vec![AnthropicContentBlock::TextContent {
+                                        type_field: "text".to_string(),
                                         text: content.clone(),
                                     }],
                                     is_error: *is_error,
@@ -98,6 +100,7 @@ impl AnthropicProvider {
                             }
                             ContentBlock::Thinking { text } => {
                                 blocks.push(AnthropicContentBlock::Text {
+                                    type_field: "text".to_string(),
                                     text: format!("[Thinking: {}]", text),
                                     cache_control: None,
                                 });
@@ -141,7 +144,7 @@ impl AnthropicProvider {
         let mut result = Vec::new();
         for block in blocks {
             match block {
-                AnthropicContentBlock::Text { text, .. } | AnthropicContentBlock::TextContent { text } => {
+                AnthropicContentBlock::Text { text, .. } | AnthropicContentBlock::TextContent { text, .. } => {
                     result.push(ContentBlock::Text { text: text.clone() });
                 }
                 AnthropicContentBlock::ToolUse { id, name, input, .. } => {
@@ -213,8 +216,10 @@ impl Provider for AnthropicProvider {
             .map_err(|e| Error::Provider(format!("Request: {}", e)))?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
             return Err(Error::Provider(format!(
-                "API error ({}): {}", resp.status(), resp.text().await.unwrap_or_default()
+                "API error ({}): {}", status, body
             )));
         }
 
@@ -278,8 +283,10 @@ impl Provider for AnthropicProvider {
             .map_err(|e| Error::Provider(format!("Stream req: {}", e)))?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
             let _ = tx.send(StreamEvent::Error {
-                message: format!("API error ({})", resp.status()),
+                message: format!("API error ({}): {}", status, err_body),
             });
             return Ok(());
         }
@@ -395,6 +402,8 @@ impl Provider for AnthropicProvider {
 //  Anthropic API 类型定义
 // ============================================================
 
+fn text_block_type() -> String { "text".to_string() }
+
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
     model: String,
@@ -424,12 +433,16 @@ struct AnthropicMessage {
 #[serde(untagged)]
 enum AnthropicContentBlock {
     Text {
+        #[serde(rename = "type", default = "text_block_type")]
+        type_field: String,
         text: String,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         cache_control: Option<CacheControl>,
     },
     #[allow(dead_code)]
     TextContent {
+        #[serde(rename = "type", default = "text_block_type")]
+        type_field: String,
         text: String,
     },
     ToolUse {
