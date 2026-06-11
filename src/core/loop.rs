@@ -439,6 +439,8 @@ pub struct SimpleLoopContext {
     pub goal_manager: Option<std::sync::Arc<tokio::sync::Mutex<GoalManager>>>,
     pub images: Option<Vec<ContentBlock>>,
     pub guardrails: Option<std::sync::Arc<crate::core::guardrail::GuardrailChain>>,
+    /// 多轮对话: 预填充的历史消息 (在 user_input 之前注入)
+    pub initial_messages: Option<Vec<Message>>,
 }
 
 /// 循环状态封装 — 集中管理 run_simple_loop 的所有可变状态
@@ -723,6 +725,7 @@ pub async fn run_simple_loop(
         goal_manager,
         images,
         guardrails,
+        initial_messages,
     } = ctx;
     let model = &config.model;
     let system_prompt = &config.system_prompt;
@@ -733,6 +736,14 @@ pub async fn run_simple_loop(
 
     // 初始化循环状态 (集中管理所有可变状态)
     let mut state = LoopState::new(token_budget);
+
+    // ── 多轮对话: 注入历史消息 ──
+    if let Some(history) = initial_messages {
+        for msg in history {
+            state.add_message(msg);
+        }
+        tracing::info!(history_count = state.messages_ref().len(), "Loaded conversation history");
+    }
 
     // 构建用户消息 (文本 + 图片)
     let mut user_content: Vec<ContentBlock> = Vec::new();
@@ -779,10 +790,20 @@ pub async fn run_simple_loop(
         // 从 ModelCaps 读取能力，不再硬编码模型名匹配
         let caps = model_caps.clone().unwrap_or_default();
 
+        // ── Prompt Cache: 标记缓存断点 ──
+        // 策略: 将倒数第2条消息标记为断点，使 API 缓存除最新消息外的整个前缀
+        // 效果: system_prompt + 历史消息被缓存，每轮只重新处理最新 1-2 条消息
+        let mut api_messages = state.messages_ref().clone();
+        if caps.prompt_cache && api_messages.len() >= 3 {
+            // 标记倒数第2条 (通常是上一轮的 assistant 回复或 tool results)
+            let bp_idx = api_messages.len().saturating_sub(2);
+            api_messages[bp_idx].cache_breakpoint = true;
+        }
+
         let tool_defs = tools.definitions();
         let provider_req = ProviderRequest {
             model: model.to_string(),
-            messages: state.messages_ref().clone(),
+            messages: api_messages,
             system_prompt: Some(system_prompt.to_string()),
             max_tokens: Some(caps.max_output_tokens as u64),
             temperature: Some(0.7),
@@ -855,6 +876,17 @@ pub async fn run_simple_loop(
 
         // 累加 token 使用并通知预算跟踪器
         state.record_usage(&stream_usage);
+
+        // 日志: prompt cache 命中信息
+        if caps.prompt_cache && (stream_usage.cache_creation_tokens > 0 || stream_usage.cache_read_tokens > 0) {
+            tracing::info!(
+                cache_hit = stream_usage.cache_read_tokens,
+                cache_create = stream_usage.cache_creation_tokens,
+                "Prompt cache: {}K tokens read, {}K created",
+                stream_usage.cache_read_tokens / 1000,
+                stream_usage.cache_creation_tokens / 1000,
+            );
+        }
 
         // 审计: LLM 请求
         {

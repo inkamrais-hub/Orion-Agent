@@ -160,6 +160,7 @@ pub async fn build_main_agent(
         .max_tool_calls(100)
         .token_budget(model_config.max_input_tokens.unwrap_or(128_000))
         .thinking(model_config.thinking)
+        .prompt_cache(model_config.prompt_cache)
         .reasoning_effort("medium")
         .build()?;
 

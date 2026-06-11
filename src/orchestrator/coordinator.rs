@@ -45,7 +45,7 @@ impl Coordinator {
         Self { config, provider, cache, registry, tools }
     }
 
-    /// 执行任务：先用 LLM 生成 TaskPlan，再按 DAG 依赖逐个执行子任务
+    /// 执行任务：先用 LLM 生成 TaskPlan，再按 DAG 依赖并行执行子任务
     pub async fn execute(&self, task_description: &str) -> crate::Result<String> {
         // 1. 调用 LLM 生成 TaskPlan
         let plan_json = self.call_llm_for_plan(task_description).await?;
@@ -53,30 +53,69 @@ impl Coordinator {
 
         tracing::info!(goal = %plan.goal, tasks = plan.tasks.len(), "Task plan created");
 
-        // 2. 循环执行可执行任务
+        // 2. 循环执行可执行任务 (无依赖的并行)
         let max_iterations = 20; // 防止死循环
         let mut iterations = 0;
         while !plan.is_complete() && iterations < max_iterations {
             iterations += 1;
 
-            let Some(subtask) = plan.next_executable().cloned() else {
+            let batch = plan.next_executable_batch();
+            if batch.is_empty() {
                 tracing::warn!("No executable tasks found, plan may be stuck");
                 break;
-            };
+            }
 
-            tracing::info!(task_id = %subtask.id, desc = %subtask.description, "Executing subtask");
+            let batch_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
+            let batch_descs: Vec<String> = batch.iter().map(|t| t.description.clone()).collect();
 
-            let worker = self.create_worker(&subtask.id).await;
-            let context = plan.completed_summary();
+            tracing::info!(batch_size = batch.len(), ids = ?batch_ids, "Executing task batch");
 
-            match worker.execute(&subtask.description, &context).await {
-                Ok(result) => {
-                    tracing::info!(task_id = %subtask.id, "Subtask completed");
-                    plan.mark_completed(&subtask.id, result);
+            if batch.len() == 1 {
+                // 单任务 — 直接执行
+                let task_id = &batch_ids[0];
+                let worker = self.create_worker(task_id).await;
+                let context = plan.completed_summary();
+                match worker.execute(&batch_descs[0], &context).await {
+                    Ok(result) => {
+                        tracing::info!(task_id = %task_id, "Subtask completed");
+                        plan.mark_completed(task_id, result);
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id, error = %e, "Subtask failed");
+                        plan.mark_failed(task_id, e.to_string());
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(task_id = %subtask.id, error = %e, "Subtask failed");
-                    plan.mark_failed(&subtask.id, e.to_string());
+            } else {
+                // 多任务 — 并行执行 (JoinSet)
+                let context = plan.completed_summary();
+                let mut join_set = tokio::task::JoinSet::new();
+
+                for (id, desc) in batch_ids.iter().zip(batch_descs.iter()) {
+                    let worker = self.create_worker(id).await;
+                    let desc = desc.clone();
+                    let ctx = context.clone();
+                    let task_id = id.clone();
+                    join_set.spawn(async move {
+                        let result = worker.execute(&desc, &ctx).await;
+                        (task_id, result)
+                    });
+                }
+
+                // 等待所有并行任务完成
+                while let Some(join_result) = join_set.join_next().await {
+                    match join_result {
+                        Ok((task_id, Ok(result))) => {
+                            tracing::info!(task_id = %task_id, "Parallel subtask completed");
+                            plan.mark_completed(&task_id, result);
+                        }
+                        Ok((task_id, Err(e))) => {
+                            tracing::warn!(task_id = %task_id, error = %e, "Parallel subtask failed");
+                            plan.mark_failed(&task_id, e.to_string());
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Parallel subtask panicked");
+                        }
+                    }
                 }
             }
         }

@@ -105,6 +105,16 @@ impl TaskPlan {
         })
     }
 
+    /// 获取所有可执行的任务 (无依赖或依赖全部完成) — 用于并行执行
+    pub fn next_executable_batch(&self) -> Vec<&SubTask> {
+        self.tasks.iter().filter(|t| {
+            t.status == TaskStatus::Pending
+                && t.dependencies.iter().all(|dep| {
+                    self.tasks.iter().any(|d| d.id == *dep && d.status == TaskStatus::Completed)
+                })
+        }).collect()
+    }
+
     /// 是否所有任务都已完成
     pub fn is_complete(&self) -> bool {
         self.tasks.iter().all(|t| t.status == TaskStatus::Completed || t.status == TaskStatus::Failed)

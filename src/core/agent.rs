@@ -39,6 +39,8 @@ pub struct AgentConfig {
     pub token_budget: u64,
     pub thinking: bool,
     pub reasoning_effort: String,
+    /// 是否启用 API 层 prompt caching (前缀缓存)
+    pub prompt_cache: bool,
 }
 
 impl Default for AgentConfig {
@@ -52,6 +54,7 @@ impl Default for AgentConfig {
             token_budget: 128_000,
             thinking: false,
             reasoning_effort: "medium".into(),
+            prompt_cache: true,
         }
     }
 }
@@ -157,6 +160,11 @@ impl AgentBuilder {
 
     pub fn reasoning_effort(mut self, effort: impl Into<String>) -> Self {
         self.config.reasoning_effort = effort.into();
+        self
+    }
+
+    pub fn prompt_cache(mut self, enabled: bool) -> Self {
+        self.config.prompt_cache = enabled;
         self
     }
 
@@ -299,7 +307,7 @@ impl Agent {
             session_id: session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             model_caps: ModelCaps {
                 thinking: self.config.thinking,
-                prompt_cache: false,
+                prompt_cache: self.config.prompt_cache,
                 max_output_tokens: resolve_max_output_tokens(&self.config.reasoning_effort),
             },
             compaction_ratio: crate::config::OrionConfig::load_cached().agent.compaction_ratio,
@@ -311,14 +319,10 @@ impl Agent {
         let loop_config = self.build_loop_config(None);
 
         let ctx = SimpleLoopContext {
-            event_callback: None,
             registry: self.registry.clone(),
             hook_engine: self.hook_engine.clone(),
             exec_policy: self.exec_policy.clone(),
-            guardrails: None,
-            rollout: None,
-            goal_manager: None,
-            images: None,
+            ..Default::default()
         };
 
         let outcome = run_simple_loop(
@@ -334,6 +338,122 @@ impl Agent {
         match outcome {
             LoopOutcome::Completed { message, .. } => Ok(message),
             LoopOutcome::MaxTurnsReached { message, .. } => Ok(message),
+            LoopOutcome::BudgetExceeded { .. } => {
+                Err(crate::Error::Agent("Token budget exceeded".into()))
+            }
+            LoopOutcome::GuardrailDenied { reason } => Err(crate::Error::Guardrail(reason)),
+            LoopOutcome::Error { message } => Err(crate::Error::Agent(message)),
+        }
+    }
+
+    /// 多轮对话 — 自动管理消息历史
+    ///
+    /// 将用户输入追加到 history，运行 agent loop，再把 assistant 回复追加回去。
+    /// 后续调用时传入同一个 history 即可保持上下文。
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut history = Vec::new();
+    /// let r1 = agent.chat_with_history("帮我写一个函数", &mut history).await?;
+    /// let r2 = agent.chat_with_history("加个单元测试", &mut history).await?;
+    /// ```
+    pub async fn chat_with_history(
+        &self,
+        input: &str,
+        history: &mut Vec<crate::core::provider::Message>,
+    ) -> crate::Result<String> {
+        use crate::core::provider::{Message, Role, ContentBlock};
+
+        // 记录用户输入到历史
+        history.push(Message::new(Role::User, vec![ContentBlock::Text { text: input.to_string() }]));
+
+        let loop_config = self.build_loop_config(None);
+
+        // 用事件回调重建对话历史 (tool calls + results)
+        let history_snapshot: Vec<Message> = history.clone();
+        let collected_tools = std::sync::Arc::new(std::sync::Mutex::new(
+            Vec::<(String, serde_json::Value, String, bool)>::new()
+        ));
+        let collected_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let ct = collected_tools.clone();
+        let cx = collected_text.clone();
+
+        let event_cb: EventCallback = std::sync::Arc::new(move |event: &LoopEvent| {
+            match event {
+                LoopEvent::TextDelta(text) => {
+                    cx.lock().unwrap().push_str(text);
+                }
+                LoopEvent::ToolStart { tool_name, input, .. } => {
+                    ct.lock().unwrap().push((
+                        tool_name.clone(),
+                        input.clone(),
+                        String::new(),
+                        true,
+                    ));
+                }
+                LoopEvent::ToolEnd { tool_name: _, result, is_error, .. } => {
+                    let mut tools = ct.lock().unwrap();
+                    if let Some(last) = tools.last_mut() {
+                        last.2 = result.clone();
+                        last.3 = !is_error;
+                    }
+                }
+                _ => {}
+            }
+        });
+
+        // 将历史消息注入 loop (跳过最后一条 — 即当前 user_input，loop 会自行添加)
+        let initial = if history_snapshot.len() > 1 {
+            Some(history_snapshot[..history_snapshot.len() - 1].to_vec())
+        } else {
+            None
+        };
+
+        let ctx = SimpleLoopContext {
+            event_callback: Some(event_cb),
+            registry: self.registry.clone(),
+            hook_engine: self.hook_engine.clone(),
+            exec_policy: self.exec_policy.clone(),
+            initial_messages: initial,
+            ..Default::default()
+        };
+
+        let outcome = run_simple_loop(
+            &*self.provider,
+            &self.tools,
+            &self.cache,
+            &loop_config,
+            input,
+            ctx,
+        )
+        .await;
+
+        // 从事件中重建对话消息并追加到 history
+        let tools = collected_tools.lock().unwrap();
+        let text = collected_text.lock().unwrap();
+
+        // 追加 tool call messages (assistant 调用工具 + tool 返回结果)
+        for (name, tool_input, result, _success) in tools.iter() {
+            // Assistant tool_use message
+            history.push(Message {
+                role: Role::Assistant,
+                content: vec![],
+                reasoning_content: None,
+                cache_breakpoint: false,
+            });
+            // Tool result message
+            history.push(Message::new(Role::User, vec![ContentBlock::Text {
+                text: format!("[Tool: {}]\n{}", name, result),
+            }]));
+            let _ = (name, tool_input); // suppress unused warnings
+        }
+
+        // 追加 assistant 最终回复
+        let reply = text.clone();
+        history.push(Message::new(Role::Assistant, vec![ContentBlock::Text { text: reply.clone() }]));
+
+        match outcome {
+            LoopOutcome::Completed { .. } | LoopOutcome::MaxTurnsReached { .. } => Ok(reply),
             LoopOutcome::BudgetExceeded { .. } => {
                 Err(crate::Error::Agent("Token budget exceeded".into()))
             }
@@ -370,6 +490,7 @@ impl Agent {
                 token_budget,
                 thinking,
                 reasoning_effort,
+                prompt_cache,
                 ..
             } = config;
 
@@ -383,7 +504,7 @@ impl Agent {
                 session_id,
                 model_caps: ModelCaps {
                     thinking,
-                    prompt_cache: false,
+                    prompt_cache,
                     max_output_tokens: resolve_max_output_tokens(&reasoning_effort),
                 },
                 compaction_ratio: crate::config::OrionConfig::load_cached().agent.compaction_ratio,
@@ -425,10 +546,7 @@ impl Agent {
                 registry,
                 hook_engine,
                 exec_policy: exec_policy.clone(),
-                guardrails: None,
-                rollout: None,
-                goal_manager: None,
-                images: None,
+                ..Default::default()
             };
 
             let outcome = run_simple_loop(

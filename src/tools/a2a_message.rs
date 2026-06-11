@@ -1,6 +1,6 @@
 //! A2A 权限通信工具
 //!
-//! send_message: 向其他 Agent 发消息 (需权限)
+//! send_message: 向其他 Agent 发消息，支持等待回复 (需权限)
 //! list_peers: 查看可通信的 Agent 列表
 
 use async_trait::async_trait;
@@ -60,14 +60,24 @@ pub struct SendMessageTool;
 impl Tool for SendMessageTool {
     fn name(&self) -> &str { "send_message" }
     fn description(&self) -> &str {
-        "Send a message to another agent. The agent will process your request and respond.          Only works if the target has granted you permission (a2a_peers in config).          Use list_peers to see who you can talk to. Use for: asking other agents for help,          sharing results, requesting information."
+        "Send a message to another agent and optionally wait for a reply. \
+         Only works if the target has granted you permission (a2a_peers in config). \
+         Use list_peers to see who you can talk to. \
+         Set wait_for_reply=true to block until the target responds (60s timeout). \
+         Use for: asking other agents for help, sharing results, requesting information."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "to": {"type": "string", "description": "Target agent ID"},
-                "message": {"type": "string", "description": "Message content"}
+                "message": {"type": "string", "description": "Message content"},
+                "wait_for_reply": {
+                    "type": "boolean",
+                    "description": "Wait for the target agent to reply (default: false). \
+                                    When true, blocks until reply or timeout (60s).",
+                    "default": false
+                }
             },
             "required": ["to", "message"]
         })
@@ -75,6 +85,7 @@ impl Tool for SendMessageTool {
     async fn execute(&self, input: Value, ctx: &ToolContext) -> crate::Result<ToolResult> {
         let to = input["to"].as_str().ok_or_else(||crate::Error::Tool("missing 'to'".into()))?;
         let message = input["message"].as_str().ok_or_else(||crate::Error::Tool("missing 'message'".into()))?;
+        let wait_for_reply = input["wait_for_reply"].as_bool().unwrap_or(false);
 
         // 权限检查
         if !has_permission(&ctx.agent_id, to) {
@@ -91,17 +102,42 @@ impl Tool for SendMessageTool {
                 from: ctx.agent_id.clone(),
                 query: message.to_string(),
             };
-            match registry.send_a2a(&to.to_string(), a2a).await {
-                Ok(_) => Ok(ToolResult {
-                    content: format!("Message sent to '{}'. The agent will process it when available.", to),
-                    is_error: false,
-                    metadata: None,
-                }),
-                Err(e) => Ok(ToolResult {
-                    content: format!("Failed to send to '{}': {}", to, e),
-                    is_error: true,
-                    metadata: None,
-                }),
+
+            if wait_for_reply {
+                // 请求-响应模式：发送并等待回复
+                match registry.send_and_wait(&to.to_string(), a2a, None).await {
+                    Ok(reply) => {
+                        let reply_content = match &reply {
+                            A2AMessage::Response { content, .. } => content.clone(),
+                            A2AMessage::ShareResult { content, .. } => content.clone(),
+                            other => other.to_json(),
+                        };
+                        Ok(ToolResult {
+                            content: format!("Reply from '{}':\n{}", to, reply_content),
+                            is_error: false,
+                            metadata: Some(json!({"mode": "request-response", "from": to})),
+                        })
+                    }
+                    Err(e) => Ok(ToolResult {
+                        content: format!("Failed to get reply from '{}': {}", to, e),
+                        is_error: true,
+                        metadata: Some(json!({"mode": "request-response"})),
+                    }),
+                }
+            } else {
+                // Fire-and-forget 模式
+                match registry.send_a2a(&to.to_string(), a2a).await {
+                    Ok(_) => Ok(ToolResult {
+                        content: format!("Message sent to '{}'. The agent will process it when available.", to),
+                        is_error: false,
+                        metadata: Some(json!({"mode": "fire-and-forget"})),
+                    }),
+                    Err(e) => Ok(ToolResult {
+                        content: format!("Failed to send to '{}': {}", to, e),
+                        is_error: true,
+                        metadata: None,
+                    }),
+                }
             }
         } else {
             Ok(ToolResult {
