@@ -186,6 +186,12 @@ impl TokenBudget {
         self.used_output += usage.output_tokens;
     }
 
+    /// 重置使用量为指定值 (压缩后使用，反映当前实际上下文大小)
+    pub fn reset_to(&mut self, current_input: TokenCount, current_output: TokenCount) {
+        self.used_input = current_input;
+        self.used_output = current_output;
+    }
+
     /// 返回当前状态: Ok / Warning / Critical
     pub fn status(&self) -> BudgetStatus {
         let usage = self.input_usage().max(self.output_usage());

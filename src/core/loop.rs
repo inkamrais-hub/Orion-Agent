@@ -649,9 +649,11 @@ impl<'a> ContextManager<'a> {
 
     /// 强制压缩上下文 (不受 token 阈值限制)
     /// 用于 budget critical 时的紧急压缩
-    pub async fn force_compact(&mut self, messages: &mut Vec<Message>) {
+    /// 返回压缩后的估算 token 数
+    pub async fn force_compact(&mut self, messages: &mut Vec<Message>) -> u64 {
         let current_tokens = self.estimate_current_tokens(messages);
         self.compact_with_fallback(messages, current_tokens).await;
+        self.last_compact_tokens
     }
 
     async fn compact_with_fallback(&mut self, messages: &mut Vec<Message>, current_tokens: u64) {
@@ -891,7 +893,11 @@ pub async fn run_simple_loop(
                     let mut ctx_mgr = ContextManager::new(
                         Some(provider), model, &mut state.cache_tracker, token_budget,
                     ).with_compaction_ratio(config.compaction_ratio);
-                    ctx_mgr.force_compact(&mut state.messages).await;
+                    let tokens_after = ctx_mgr.force_compact(&mut state.messages).await;
+                    // 压缩后重置预算追踪器，反映当前实际上下文大小
+                    state.token_budget_tracker.reset_to(tokens_after, state.total_usage.output_tokens);
+                    state.budget_critical_streak = 0; // 重置 streak，给模型更多机会
+                    tracing::info!("Budget reset after compaction: context now ~{} tokens", tokens_after);
                 }
             }
             _ => {

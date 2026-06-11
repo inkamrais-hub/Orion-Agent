@@ -262,15 +262,7 @@ impl Provider for OpenAICompatProvider {
             .header("Accept", "text/event-stream")
             .json(&body).send().await
             .map_err(|e| {
-                let detail = if e.is_connect() {
-                    format!("连接失败 (DNS/TLS/网络不可达): {}", e)
-                } else if e.is_timeout() {
-                    "请求超时 (120s)".into()
-                } else if e.is_request() {
-                    format!("请求构建失败: {}", e)
-                } else {
-                    e.to_string()
-                };
+                let detail = format!("{:?}", e); // 使用 Debug 格式显示完整错误链
                 Error::Provider(format!("Stream req: {}", detail))
             })?;
         if !resp.status().is_success() {
