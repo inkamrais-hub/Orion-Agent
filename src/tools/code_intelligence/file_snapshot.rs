@@ -289,7 +289,7 @@ impl SnapshotStore {
         // 更新索引
         self.index
             .entry(file_path.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(entry.clone());
 
         // 根据风险级别返回不同结果
@@ -539,7 +539,7 @@ impl SnapshotStore {
             for file_entry in std::fs::read_dir(dir_entry.path())? {
                 let file_entry = file_entry?;
                 let path = file_entry.path();
-                if path.extension().map_or(true, |e| e != "json") {
+                if path.extension().is_none_or(|e| e != "json") {
                     continue;
                 }
 
@@ -547,7 +547,7 @@ impl SnapshotStore {
                     if let Ok(entry) = serde_json::from_str::<SnapshotEntry>(&content) {
                         self.index
                             .entry(entry.file_path.clone())
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(entry);
                     }
                 }

@@ -210,7 +210,7 @@ pub async fn compact_context_with_llm(
     // 计算压缩前的内容总长度 (用于估算 tokens_freed)
     let before_content_len: usize = messages.iter()
         .flat_map(|m| m.content.iter())
-        .map(|b| content_block_len(b))
+        .map(content_block_len)
         .sum();
 
     // Track whether LLM-dependent compaction actually succeeded.
@@ -241,7 +241,7 @@ pub async fn compact_context_with_llm(
                 let mut kept: Vec<Msg> = Vec::new();
                 let h = (*head_count).min(before);
                 for m in messages.drain(..h) { kept.push(m); }
-                let remaining: Vec<Msg> = messages.drain(..).collect();
+                let remaining: Vec<Msg> = std::mem::take(messages);
                 let skip = remaining.len().saturating_sub(*tail_count);
                 for m in remaining.into_iter().skip(skip) { kept.push(m); }
                 *messages = kept;
@@ -336,7 +336,7 @@ pub async fn compact_context_with_llm(
     // 计算压缩后的内容总长度
     let after_content_len: usize = messages.iter()
         .flat_map(|m| m.content.iter())
-        .map(|b| content_block_len(b))
+        .map(content_block_len)
         .sum();
     // 改进的 tokens 估算: 基于消息内容长度而非固定值
     let tokens_freed = estimate_tokens(before_content_len)
@@ -380,12 +380,7 @@ fn sanitize_messages(messages: &mut Vec<Message>) {
                 true
             }
             Role::Tool => {
-                if has_pending_tool_use {
-                    has_pending_tool_use = false;
-                    true
-                } else {
-                    false // 孤立的 Tool 消息，移除
-                }
+                std::mem::take(&mut has_pending_tool_use)
             }
             _ => true,
         }

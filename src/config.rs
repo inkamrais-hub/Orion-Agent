@@ -77,7 +77,7 @@ impl OrionConfig {
     /// 缓存版本: 只加载一次，后续直接返回引用
     pub fn load_cached() -> &'static OrionConfig {
         static CONFIG_CACHE: std::sync::OnceLock<OrionConfig> = std::sync::OnceLock::new();
-        CONFIG_CACHE.get_or_init(|| Self::load())
+        CONFIG_CACHE.get_or_init(Self::load)
     }
 
     /// 从指定路径加载
@@ -305,7 +305,7 @@ fn substitute_env(input: &str) -> String {
             chars.next();
             let mut var_name = String::new();
             let mut found = false;
-            while let Some(nc) = chars.next() {
+            for nc in chars.by_ref() {
                 if nc == '}' { found = true; break; }
                 var_name.push(nc);
             }

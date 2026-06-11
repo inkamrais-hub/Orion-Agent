@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 /// SubAgent 模型策略
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[derive(Default)]
 pub enum SubAgentModelPolicy {
     #[serde(rename = "inherit")]
+    #[default]
     Inherit,
     #[serde(rename = "custom")]
     Custom {
@@ -21,6 +23,3 @@ pub enum SubAgentModelPolicy {
     },
 }
 
-impl Default for SubAgentModelPolicy {
-    fn default() -> Self { Self::Inherit }
-}

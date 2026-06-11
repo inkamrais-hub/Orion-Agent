@@ -237,8 +237,8 @@ impl ExecPolicy {
         }
 
         // 特殊处理 git: 只允许只读子命令
-        if program_name == "git" || program_lower == "git" {
-            if parts.len() > 1 {
+        if (program_name == "git" || program_lower == "git")
+            && parts.len() > 1 {
                 let subcmd = parts[1].to_lowercase();
                 for forbidden_sub in SANDBOX_FORBIDDEN_GIT_SUBCOMMANDS {
                     if subcmd == *forbidden_sub {
@@ -246,7 +246,6 @@ impl ExecPolicy {
                     }
                 }
             }
-        }
 
         // 检查 PowerShell 网络 cmdlet (通过 powershell -Command "...")
         if program_name == "powershell" || program_name == "powershell.exe"

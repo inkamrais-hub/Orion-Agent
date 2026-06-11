@@ -48,7 +48,7 @@ fn do_init() {
                 .with_filter(filter)
         );
 
-    if let Err(_) = tracing::subscriber::set_global_default(subscriber) {
+    if tracing::subscriber::set_global_default(subscriber).is_err() {
         eprintln!("Warning: tracing subscriber already set, logging may not work");
     }
 

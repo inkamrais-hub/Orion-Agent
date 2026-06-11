@@ -36,6 +36,12 @@ impl Clone for ToolRegistry {
     }
 }
 
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -180,10 +186,7 @@ impl ToolRegistry {
             None
         };
         let content_before = if let Some(ref path_str) = snapshot_path {
-            match tokio::fs::read_to_string(path_str).await {
-                Ok(content) => Some(content),
-                Err(_) => None, // 文件不存在（新建场景）
-            }
+            tokio::fs::read_to_string(path_str).await.ok()
         } else {
             None
         };
@@ -203,6 +206,10 @@ impl ToolRegistry {
 
     pub fn len(&self) -> usize {
         self.tools.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
     }
 }
 
@@ -239,9 +246,7 @@ fn normalize_and_validate_path(path_str: &str, working_dir: &str) -> crate::Resu
 
     // 2. 检查路径中是否含有 .. 组件 (路径穿越防护)
     if normalized.components().any(|c| c.as_os_str() == "..") {
-        return Err(crate::Error::Tool(format!(
-            "Path traversal detected: path escapes working directory"
-        )));
+        return Err(crate::Error::Tool("Path traversal detected: path escapes working directory".to_string()));
     }
 
     // 3. 统一路径分隔符为 /

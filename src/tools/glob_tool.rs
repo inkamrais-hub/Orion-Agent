@@ -128,7 +128,7 @@ fn find_matches(
                 continue;
             }
             // 跳过默认排除 + 用户排除
-            if DEFAULT_IGNORES.contains(&name.as_str()) || user_ignore.iter().any(|i| *i == name) {
+            if DEFAULT_IGNORES.contains(&name.as_str()) || user_ignore.contains(&name) {
                 continue;
             }
             find_matches(&path, root, pattern, user_ignore, results, depth + 1);
@@ -212,7 +212,7 @@ fn matches_glob(path: &str, pattern: &str) -> bool {
         if matches_glob_segment(filename, last) {
             // 确保路径前缀也匹配
             let expected_prefix = &parts[..parts.len() - 1].join("/");
-            let path_prefix = path_normalized.rsplitn(2, '/').nth(1).unwrap_or("");
+            let path_prefix = path_normalized.rsplit_once('/').map(|x| x.0).unwrap_or("");
             return path_prefix == expected_prefix
                 || path_prefix.ends_with(&format!("/{}", expected_prefix));
         }
@@ -237,14 +237,12 @@ fn matches_glob_segment(name: &str, segment: &str) -> bool {
     }
 
     // * 前缀通配
-    if segment.starts_with('*') {
-        let suffix = &segment[1..];
+    if let Some(suffix) = segment.strip_prefix('*') {
         return name.ends_with(suffix);
     }
 
     // * 后缀通配
-    if segment.ends_with('*') {
-        let prefix = &segment[..segment.len() - 1];
+    if let Some(prefix) = segment.strip_suffix('*') {
         return name.starts_with(prefix);
     }
 

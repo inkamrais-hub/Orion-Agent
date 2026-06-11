@@ -88,6 +88,12 @@ struct PermissionRule {
     required_level: PermissionLevel,
 }
 
+impl Default for PermissionGuardrail {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PermissionGuardrail {
     pub fn new() -> Self {
         Self { rules: Vec::new() }
@@ -190,6 +196,12 @@ impl Guardrail for BudgetGuardrail {
 #[derive(Clone)]
 pub struct GuardrailChain {
     guardrails: Vec<Arc<dyn Guardrail>>,
+}
+
+impl Default for GuardrailChain {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GuardrailChain {

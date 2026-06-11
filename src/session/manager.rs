@@ -38,8 +38,7 @@ impl SessionManager {
     pub async fn open() -> crate::Result<Self> {
         let session_dir = session_dir()?;
         fs::create_dir_all(&session_dir).await.map_err(|e| {
-            crate::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            crate::Error::Io(std::io::Error::other(
                 format!("Cannot create {:?}: {}", session_dir, e),
             ))
         })?;
@@ -134,7 +133,7 @@ impl SessionManager {
         let index = self.load_index().await;
         let mut results = Vec::new();
 
-        for (_key, entry) in &index {
+        for entry in index.values() {
             let jsonl_path = self.session_dir.join(format!("{}.jsonl", entry.session_id));
             if let Ok(content) = fs::read_to_string(&jsonl_path).await {
                 if content.to_lowercase().contains(&query.to_lowercase()) {

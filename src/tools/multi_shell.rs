@@ -159,6 +159,12 @@ pub struct MultiShellExecutor {
     default_shell: ShellKind,
 }
 
+impl Default for MultiShellExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiShellExecutor {
     pub fn new() -> Self {
         Self {
@@ -380,7 +386,7 @@ impl Tool for MultiShellTool {
         }
 
         let shell = input["shell"].as_str()
-            .and_then(|s| ShellKind::from_str(s));
+            .and_then(ShellKind::from_str);
 
         let pre_input = input["input"].as_str();
 

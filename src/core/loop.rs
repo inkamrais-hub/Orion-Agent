@@ -200,6 +200,12 @@ pub struct StepObserver {
     max_consecutive_errors: u32,
 }
 
+impl Default for StepObserver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StepObserver {
     pub fn new() -> Self {
         Self {
@@ -302,10 +308,10 @@ fn estimate_text_tokens(text: &str) -> u64 {
             whitespace_chars += 1;
         } else if ch.is_ascii() {
             ascii_chars += 1;
-        } else if ch >= '\u{4e00}' && ch <= '\u{9fff}' {
+        } else if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
             // CJK 统一汉字
             chinese_chars += 1;
-        } else if ch >= '\u{3000}' && ch <= '\u{303f}' {
+        } else if ('\u{3000}'..='\u{303f}').contains(&ch) {
             // CJK 标点
             chinese_chars += 1;
         } else {
@@ -803,7 +809,7 @@ pub async fn run_simple_loop(
             provider.stream(provider_req, stream_tx),
         ).await;
 
-        if let Err(_) = stream_result {
+        if stream_result.is_err() {
             return LoopOutcome::Error { message: "Stream timeout".into() };
         }
         if let Ok(Err(e)) = stream_result {
@@ -1117,7 +1123,7 @@ pub async fn run_simple_loop(
             .with_compaction_ratio(config.compaction_ratio);
         ctx_mgr.check_and_compact(&mut state.messages).await;
         ctx_mgr.check_periodic_compact(&mut state.messages, state.turn_number).await;
-        drop(ctx_mgr); // 释放借用
+        // ctx_mgr 借用在此结束 (NLL 自动释放)
 
         // 如果压缩发生了，注入已读文件提醒 (防止模型重复读取)
         if state.messages.len() < messages_before_compact && !state.read_files.is_empty() {

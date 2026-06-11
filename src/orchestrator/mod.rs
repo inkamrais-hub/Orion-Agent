@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 /// 编排模式
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default)]
 pub enum OrchestratorMode {
+    #[default]
     Sequential,
     Parallel,
     Collaborative,
@@ -45,9 +47,6 @@ impl std::str::FromStr for OrchestratorMode {
     }
 }
 
-impl Default for OrchestratorMode {
-    fn default() -> Self { Self::Sequential }
-}
 
 /// 编排器配置
 #[derive(Debug, Clone)]

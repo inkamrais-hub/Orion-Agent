@@ -100,6 +100,12 @@ pub struct AgentBuilder {
     lazy_mode: bool,
 }
 
+impl Default for AgentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentBuilder {
     pub fn new() -> Self {
         Self {

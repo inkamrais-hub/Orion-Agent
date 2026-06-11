@@ -52,18 +52,18 @@ pub struct FileDepGraph {
 
 /// 分析项目依赖图
 pub fn analyze_deps(root: &Path) -> DepGraph {
-    let mut graph = DepGraph { nodes: Vec::new(), edges: Vec::new() };
+    let graph = DepGraph { nodes: Vec::new(), edges: Vec::new() };
 
     // Cargo.toml 依赖
     let cargo_toml = root.join("Cargo.toml");
     if cargo_toml.exists() {
-        parse_cargo_deps(&cargo_toml, &mut graph);
+        parse_cargo_deps(&cargo_toml, &graph);
     }
 
     // package.json 依赖
     let package_json = root.join("package.json");
     if package_json.exists() {
-        parse_package_json_deps(&package_json, &mut graph);
+        parse_package_json_deps(&package_json, &graph);
     }
 
     graph
@@ -89,7 +89,7 @@ pub fn analyze_file_deps(root: &Path, language: &str) -> FileDepGraph {
             for imp in &imports {
                 graph.imported_by
                     .entry(imp.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(file_str.clone());
             }
             graph.imports.insert(file_str, imports);
@@ -345,6 +345,6 @@ fn extract_field(toml_str: &str, field: &str) -> Option<String> {
     let pattern = format!("{} = ", field);
     let start = toml_str.find(&pattern)?;
     let rest = &toml_str[start + pattern.len()..];
-    let end = rest.find(|c: char| c == ',' || c == '}' || c == '\n').unwrap_or(rest.len());
+    let end = rest.find([',', '}', '\n']).unwrap_or(rest.len());
     Some(rest[..end].trim().trim_matches('"').to_string())
 }

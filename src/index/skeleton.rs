@@ -363,7 +363,7 @@ fn try_extract_enum(lines: &[&str], start: usize) -> Option<(SkeletonEntry, usiz
         .collect();
 
     let sig = if variants.is_empty() {
-        format!("enum {{ }}", )
+        "enum { }".to_string()
     } else {
         format!("enum {} {{\n{}\n}}", name, variants.join("\n"))
     };
@@ -497,7 +497,7 @@ fn extract_name_after_keyword(line: &str, keyword: &str) -> String {
         let after = &line[pos + keyword.len()..];
         let trimmed = after.trim_start();
         trimmed
-            .split(|c: char| c == '{' || c == ':' || c == '<' || c == ' ' || c == '\t' || c == '(')
+            .split(['{', ':', '<', ' ', '\t', '('])
             .next()
             .unwrap_or("?")
             .to_string()
@@ -511,7 +511,7 @@ fn extract_name_from_after(line: &str, keyword: &str) -> String {
         let after = &line[pos + keyword.len()..];
         after
             .trim()
-            .split(|c: char| c == '{' || c == ';' || c == ' ' || c == '\t')
+            .split(['{', ';', ' ', '\t'])
             .next()
             .unwrap_or("?")
             .to_string()
@@ -525,7 +525,7 @@ fn extract_name_from_line(line: &str, keyword: &str) -> String {
         let after = &line[pos + keyword.len()..];
         after
             .trim()
-            .split(|c: char| c == ':' || c == '=' || c == '{' || c == ' ' || c == '\t')
+            .split([':', '=', '{', ' ', '\t'])
             .next()
             .unwrap_or("?")
             .to_string()
@@ -558,7 +558,7 @@ fn extract_python_skeleton(content: &str) -> Vec<SkeletonEntry> {
             });
         } else if trimmed.starts_with("class ") {
             let name = trimmed
-                .split(|c: char| c == '(' || c == ':' || c == '{')
+                .split(['(', ':', '{'])
                 .next()
                 .unwrap_or("?")
                 .trim_start_matches("class ")
@@ -608,7 +608,7 @@ fn extract_js_skeleton(content: &str) -> Vec<SkeletonEntry> {
             });
         } else if trimmed.starts_with("class ") || trimmed.starts_with("export class ") {
             let name = trimmed
-                .split(|c: char| c == '{' || c == '(' || c == ' ')
+                .split(['{', '(', ' '])
                 .nth(1)
                 .unwrap_or("?")
                 .to_string();

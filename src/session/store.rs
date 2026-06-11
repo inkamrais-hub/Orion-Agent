@@ -950,7 +950,7 @@ impl SessionStore {
                     Some(Ok(meta)) => meta,
                     Some(Err(e)) => return Err(e.into()),
                     None => {
-                        return Err(crate::Error::Tool(format!("Session not found: {}", session_id)).into());
+                        return Err(crate::Error::Tool(format!("Session not found: {}", session_id)));
                     }
                 }
             };

@@ -70,7 +70,7 @@ impl GoalManager {
 
     /// 创建新目标
     pub fn create(&mut self, description: impl Into<String>, token_budget: u64) -> String {
-        let goal_id = format!("goal_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        let goal_id = format!("goal_{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let now = Utc::now();
 
         let goal = Goal {
