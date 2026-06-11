@@ -817,7 +817,7 @@ pub async fn run_simple_loop(
             reasoning_effort: if caps.thinking {
                 Some("high".to_string())
             } else { None },
-            enable_prompt_cache: Some(caps.prompt_cache && system_prompt.len() > 500),
+            enable_prompt_cache: Some(caps.prompt_cache),
             cache_key: None,
         };
 

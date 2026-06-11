@@ -217,8 +217,9 @@ impl Provider for OpenAICompatProvider {
             usage: UsageInfo {
                 input_tokens: chat.usage.prompt_tokens as u64,
                 output_tokens: chat.usage.completion_tokens as u64,
-                cache_creation_tokens: chat.usage.prompt_cache_hit_tokens.unwrap_or(0) as u64,
-                cache_read_tokens: 0,
+                // DeepSeek API: prompt_cache_hit_tokens = 从缓存读取的 tokens (cache read)
+                cache_creation_tokens: 0,
+                cache_read_tokens: chat.usage.prompt_cache_hit_tokens.unwrap_or(0) as u64,
             },
         })
     }
@@ -293,8 +294,8 @@ impl Provider for OpenAICompatProvider {
                         last_usage = Some(UsageInfo {
                             input_tokens: u.prompt_tokens as u64,
                             output_tokens: u.completion_tokens as u64,
-                            cache_creation_tokens: u.prompt_cache_hit_tokens.unwrap_or(0) as u64,
-                            cache_read_tokens: 0,
+                            cache_creation_tokens: 0,
+                            cache_read_tokens: u.prompt_cache_hit_tokens.unwrap_or(0) as u64,
                         });
                     }
                     let Some(choice) = chunk.choices.into_iter().next() else { continue; };
