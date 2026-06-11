@@ -39,6 +39,7 @@ impl OpenAICompatProvider {
     pub fn new(api_base: &str, api_key: &str, model: &str) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| Client::new());
         Self { client, api_base: api_base.trim_end_matches('/').to_string(), api_key: api_key.to_string(), model: model.to_string() }
@@ -260,7 +261,18 @@ impl Provider for OpenAICompatProvider {
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .json(&body).send().await
-            .map_err(|e| Error::Provider(format!("Stream req: {}", e)))?;
+            .map_err(|e| {
+                let detail = if e.is_connect() {
+                    format!("连接失败 (DNS/TLS/网络不可达): {}", e)
+                } else if e.is_timeout() {
+                    "请求超时 (120s)".into()
+                } else if e.is_request() {
+                    format!("请求构建失败: {}", e)
+                } else {
+                    e.to_string()
+                };
+                Error::Provider(format!("Stream req: {}", detail))
+            })?;
         if !resp.status().is_success() {
             let _ = tx.send(StreamEvent::Error { message: format!("API error ({})", resp.status()) });
             return Ok(());

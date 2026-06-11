@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::collections::HashSet;
 
 use crate::audit::{AuditEvent as GlobalAuditEvent, AUDIT_LOGGER};
 use tracing::{debug, info};
@@ -399,6 +400,8 @@ pub struct SimpleLoopConfig {
     pub agent_id: String,
     pub session_id: String,
     pub model_caps: ModelCaps,
+    /// 压缩触发比例 (0.5-0.95)，当估算 token 超过 token_budget * compaction_ratio 时触发
+    pub compaction_ratio: f64,
 }
 
 impl Default for SimpleLoopConfig {
@@ -412,6 +415,7 @@ impl Default for SimpleLoopConfig {
             agent_id: "main".into(),
             session_id: uuid::Uuid::new_v4().to_string(),
             model_caps: ModelCaps::default(),
+            compaction_ratio: 0.80,
         }
     }
 }
@@ -454,6 +458,8 @@ pub struct LoopState {
     pub cache_tracker: crate::core::cache::CacheBreakTracker,
     /// 连续 budget critical 轮次 (用于强制终止)
     budget_critical_streak: u32,
+    /// 已读取的文件路径集合 (用于防止压缩后重复读取)
+    pub read_files: HashSet<String>,
 }
 
 impl LoopState {
@@ -469,6 +475,7 @@ impl LoopState {
             observer: Arc::new(tokio::sync::Mutex::new(StepObserver::new())),
             cache_tracker: crate::core::cache::CacheBreakTracker::new(),
             budget_critical_streak: 0,
+            read_files: HashSet::new(),
         }
     }
 
@@ -542,18 +549,22 @@ impl LoopState {
 
 /// 上下文管理器 — 封装消息压缩策略
 ///
-/// 集中处理"消息过多时压缩"逻辑，使用 Auto 策略（LLM 摘要），
-/// 失败时回退到 Micro 策略（保留最近 N 条简单裁剪）。
+/// 基于 token 预算驱动压缩，而非固定消息数量。
+/// 当估算 token 使用量超过 `context_window * compaction_ratio` 时触发压缩。
 pub struct ContextManager<'a> {
     provider: Option<&'a dyn crate::core::provider::Provider>,
     model: &'a str,
     cache_tracker: &'a mut crate::core::cache::CacheBreakTracker,
-    /// 触发压缩的消息数量阈值 (降低到 20，避免上下文膨胀)
-    threshold: usize,
+    /// 上下文窗口大小 (tokens)，来自模型配置 max_input_tokens
+    context_window: u64,
+    /// 压缩触发比例 (默认 0.80，即 80% 上下文窗口时触发)
+    compaction_ratio: f64,
     /// 上次压缩时的轮次 (用于定期压缩)
     last_compact_turn: u64,
-    /// 定期压缩间隔 (每 N 轮强制压缩一次)
+    /// 定期压缩间隔 (每 N 轮强制压缩一次，0 表示禁用)
     periodic_interval: u64,
+    /// 上次压缩后的估算 token 数 (用于防循环检测)
+    last_compact_tokens: u64,
 }
 
 impl<'a> ContextManager<'a> {
@@ -562,62 +573,127 @@ impl<'a> ContextManager<'a> {
         provider: Option<&'a dyn crate::core::provider::Provider>,
         model: &'a str,
         cache_tracker: &'a mut crate::core::cache::CacheBreakTracker,
+        context_window: u64,
     ) -> Self {
         Self {
             provider, model, cache_tracker,
-            threshold: 20,          // 从 50 降到 20，更早触发压缩
+            context_window,
+            compaction_ratio: 0.80,  // 默认 80% 上下文窗口时触发压缩
             last_compact_turn: 0,
-            periodic_interval: 10,  // 每 10 轮强制压缩一次
+            periodic_interval: 0,    // 禁用定期压缩，完全由 token 预算驱动
+            last_compact_tokens: 0,
         }
     }
 
-    /// 检查消息数量，超过阈值时自动压缩
+    /// 设置压缩触发比例 (0.0-1.0)
+    pub fn with_compaction_ratio(mut self, ratio: f64) -> Self {
+        self.compaction_ratio = ratio.clamp(0.5, 0.95);
+        self
+    }
+
+    /// 估算当前消息的 token 使用量
+    fn estimate_current_tokens(&self, messages: &[Message]) -> u64 {
+        messages.iter().map(|m| {
+            let content_tokens: u64 = m.content.iter().map(|b| {
+                use crate::core::provider::ContentBlock;
+                match b {
+                    ContentBlock::Text { text } => estimate_text_tokens(text),
+                    ContentBlock::ToolUse { input, .. } => estimate_text_tokens(&input.to_string()),
+                    ContentBlock::ToolResult { content, .. } => estimate_text_tokens(content),
+                    ContentBlock::Thinking { text } => estimate_text_tokens(text) / 2, // thinking 通常更紧凑
+                    ContentBlock::Image { .. } => 1000, // 图片估算 1000 tokens
+                }
+            }).sum::<u64>();
+            // 加上消息本身的开销 (role, metadata 等)
+            content_tokens + 50
+        }).sum()
+    }
+
+    /// 检查 token 使用量，超过阈值时自动压缩
     /// 使用 Auto 策略（LLM 摘要），失败时回退到 Micro 策略
     pub async fn check_and_compact(&mut self, messages: &mut Vec<Message>) {
-        if messages.len() > self.threshold {
-            self.compact_with_fallback(messages).await;
+        let current_tokens = self.estimate_current_tokens(messages);
+        let threshold_tokens = (self.context_window as f64 * self.compaction_ratio) as u64;
+
+        if current_tokens > threshold_tokens {
+            info!(
+                "Token-based compaction triggered: {} tokens > {} tokens ({:.0}% of {} context window)",
+                current_tokens, threshold_tokens, self.compaction_ratio * 100.0, self.context_window
+            );
+            self.compact_with_fallback(messages, current_tokens).await;
         }
     }
 
-    /// 检查是否需要定期压缩 (基于轮次间隔)
+    /// 检查是否需要定期压缩 (基于轮次间隔，默认禁用)
     pub async fn check_periodic_compact(
         &mut self,
         messages: &mut Vec<Message>,
         current_turn: u64,
     ) {
+        if self.periodic_interval == 0 {
+            return; // 定期压缩已禁用
+        }
         if current_turn > 0
             && current_turn - self.last_compact_turn >= self.periodic_interval
             && messages.len() > 5
         {
+            let current_tokens = self.estimate_current_tokens(messages);
             info!(
-                "Periodic compaction: turn={}, messages={}, interval={}",
-                current_turn, messages.len(), self.periodic_interval
+                "Periodic compaction: turn={}, tokens={}, interval={}",
+                current_turn, current_tokens, self.periodic_interval
             );
             self.last_compact_turn = current_turn;
-            self.compact_with_fallback(messages).await;
+            self.compact_with_fallback(messages, current_tokens).await;
         }
     }
 
-    /// 强制压缩上下文 (不受消息数阈值限制)
+    /// 强制压缩上下文 (不受 token 阈值限制)
     /// 用于 budget critical 时的紧急压缩
     pub async fn force_compact(&mut self, messages: &mut Vec<Message>) {
-        self.compact_with_fallback(messages).await;
+        let current_tokens = self.estimate_current_tokens(messages);
+        self.compact_with_fallback(messages, current_tokens).await;
     }
 
-    async fn compact_with_fallback(&mut self, messages: &mut Vec<Message>) {
-        // 用 Auto 策略（LLM 摘要）替代 Snip，避免破坏 tool_use/tool_result 配对
+    async fn compact_with_fallback(&mut self, messages: &mut Vec<Message>, current_tokens: u64) {
+        // 防循环: 如果上次压缩后 token 数仍然很低 (<= 30% context window)，
+        // 说明压缩后模型很快又填满，此时用更激进的 Collapse 策略
+        let threshold_30_pct = (self.context_window as f64 * 0.30) as u64;
+        let use_collapse = self.last_compact_tokens > 0
+            && self.last_compact_tokens <= threshold_30_pct
+            && current_tokens > (self.context_window as f64 * self.compaction_ratio) as u64;
+
+        if use_collapse {
+            // 压缩循环检测: 用 Collapse 策略 (只保留摘要 + 最近消息)
+            let strategy = CompactionStrategy::Collapse { max_summary_words: 500 };
+            let result = compact_context(messages, &strategy, self.provider, self.model).await;
+            if let Some(r) = result {
+                self.cache_tracker.record(crate::core::cache::CacheBreakVector::ContextCompaction);
+                self.last_compact_turn = 0; // 重置定期压缩计时
+                self.last_compact_tokens = self.estimate_current_tokens(messages);
+                info!(
+                    "Collapse compaction (loop detected): {} -> {} messages, freed {} tokens, now {} tokens",
+                    r.messages_before, r.messages_after, r.tokens_freed, self.last_compact_tokens
+                );
+            }
+            return;
+        }
+
+        // 正常路径: Auto 策略（LLM 摘要），失败时回退到 Micro
         let strategy = CompactionStrategy::Auto { summary_target_tokens: 2000 };
         let result = compact_context(messages, &strategy, self.provider, self.model).await;
         if let Some(r) = result {
             self.cache_tracker.record(crate::core::cache::CacheBreakVector::ContextCompaction);
+            self.last_compact_turn = 0;
+            self.last_compact_tokens = self.estimate_current_tokens(messages);
             info!(
-                "Simple loop compacted: {} -> {} messages, freed {} tokens | CacheBreak: ContextCompaction",
-                r.messages_before, r.messages_after, r.tokens_freed
+                "Token-based compact: {} -> {} messages, freed {} tokens, now {} tokens | CacheBreak: ContextCompaction",
+                r.messages_before, r.messages_after, r.tokens_freed, self.last_compact_tokens
             );
         } else {
-            // Auto 失败时用 Micro（保留最近 5 条，简单裁剪）
-            let strategy = CompactionStrategy::Micro { keep_recent: 5 };
+            // Auto 失败时用 Micro（保留最近 10 条）
+            let strategy = CompactionStrategy::Micro { keep_recent: 10 };
             let _ = compact_context(messages, &strategy, None, self.model).await;
+            self.last_compact_tokens = self.estimate_current_tokens(messages);
         }
     }
 }
@@ -809,12 +885,12 @@ pub async fn run_simple_loop(
                     }
                     return LoopOutcome::BudgetExceeded { usage: state.usage_clone() };
                 }
-                // 首次 critical: 立即触发上下文压缩 (不受消息数阈值限制)
+                // 首次 critical: 立即触发上下文压缩 (不受 token 阈值限制)
                 if streak == 1 {
                     tracing::info!("Budget critical: forcing immediate context compaction");
                     let mut ctx_mgr = ContextManager::new(
-                        Some(provider), model, &mut state.cache_tracker,
-                    );
+                        Some(provider), model, &mut state.cache_tracker, token_budget,
+                    ).with_compaction_ratio(config.compaction_ratio);
                     ctx_mgr.force_compact(&mut state.messages).await;
                 }
             }
@@ -918,10 +994,26 @@ pub async fn run_simple_loop(
         // 处理执行结果
         let mut replan_hint: Option<String> = None;
         let mut early_stop_reason: Option<String> = None;
+        let mut read_files_this_turn: Vec<String> = Vec::new();
 
         for outcome_res in execution_outcomes {
             match outcome_res {
                 Ok(outcome) => {
+                    // 追踪文件读取 (用于压缩后防止重复读取)
+                    if outcome.tool_name == "read" || outcome.tool_name == "glob" {
+                        if let Some(path) = outcome.result.content.lines().next()
+                            .and_then(|l| l.strip_prefix("==> "))
+                            .or_else(|| outcome.tool_name.eq("read").then(|| {
+                                // 从 read 工具的 input 提取路径
+                                acc_tools.iter()
+                                    .find(|(id, _, _)| id == &outcome.tool_call_id)
+                                    .and_then(|(_, _, input)| input["path"].as_str())
+                            }).flatten())
+                        {
+                            read_files_this_turn.push(path.to_string());
+                        }
+                    }
+                    
                     state.add_message(build_tool_result_message(
                         &outcome.tool_call_id,
                         &outcome.tool_name,
@@ -1006,12 +1098,40 @@ pub async fn run_simple_loop(
         state.cache_tracker_mut().record(crate::core::cache::CacheBreakVector::ToolResultChange);
         debug!("CacheBreak: ToolResultChange");
 
-        // 上下文压缩: 消息过多时压缩 + 定期压缩 (每 10 轮)
+        // 更新已读文件集合
+        let messages_before_compact = state.messages.len();
+        for path in read_files_this_turn {
+            state.read_files.insert(path);
+        }
+
+        // 上下文压缩: 基于 token 预算驱动 (当估算 token 超过 context_window * compaction_ratio 时触发)
         // 注: 此处使用直接字段借用，因为 ContextManager 同时需要 &mut cache_tracker 和 &mut messages，
         //     通过字段直接借用 Rust 可自动 split-borrow (方法返回的借用则不会 split)
-        let mut ctx_mgr = ContextManager::new(Some(provider), model, &mut state.cache_tracker);
+        let mut ctx_mgr = ContextManager::new(Some(provider), model, &mut state.cache_tracker, token_budget)
+            .with_compaction_ratio(config.compaction_ratio);
         ctx_mgr.check_and_compact(&mut state.messages).await;
         ctx_mgr.check_periodic_compact(&mut state.messages, state.turn_number).await;
+        drop(ctx_mgr); // 释放借用
+
+        // 如果压缩发生了，注入已读文件提醒 (防止模型重复读取)
+        if state.messages.len() < messages_before_compact && !state.read_files.is_empty() {
+            let file_list: Vec<String> = state.read_files.iter()
+                .take(50) // 最多提醒 50 个文件
+                .cloned()
+                .collect();
+            let reminder = format!(
+                "[System: File Read Tracker]\n\
+                 以下文件已经被读取过，请勿重复读取。如需查看这些文件的内容，请基于之前的上下文继续工作：\n{}",
+                file_list.join("\n")
+            );
+            state.add_message(Message {
+                role: Role::System,
+                content: vec![ContentBlock::Text { text: reminder }],
+                reasoning_content: None,
+                cache_breakpoint: false,
+            });
+            info!("Injected file read reminder: {} files", file_list.len());
+        }
 
         tokio::task::yield_now().await;
     }

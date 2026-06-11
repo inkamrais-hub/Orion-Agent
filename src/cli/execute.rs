@@ -27,10 +27,19 @@ pub fn build_system_prompt_static() -> String {
     // ── 工作流程 ──
     prompt.push_str("[Workflow]\n");
     prompt.push_str("For complex tasks:\n");
-    prompt.push_str("1. **Understand** - Read relevant files and code to understand the context\n");
-    prompt.push_str("2. **Plan** - Identify what needs to change (don't output the plan, just think it)\n");
-    prompt.push_str("3. **Execute** - Make changes using tools\n");
-    prompt.push_str("4. **Verify** - Run `cargo check`, `npm run lint`, or similar to validate\n\n");
+    prompt.push_str("1. **Understand** - Use `project_map` or `glob` to understand structure FIRST\n");
+    prompt.push_str("2. **Prioritize** - Read ONLY core files (main.rs, lib.rs, mod.rs). Avoid reading all submodules.\n");
+    prompt.push_str("3. **Plan** - Identify what needs to change (don't output the plan, just think it)\n");
+    prompt.push_str("4. **Execute** - Make changes using tools\n");
+    prompt.push_str("5. **Verify** - Run `cargo check`, `npm run lint`, or similar to validate\n\n");
+
+    prompt.push_str("[File Reading Strategy - CRITICAL]\n");
+    prompt.push_str("- **NEVER read all files in a directory**. This wastes tokens and context.\n");
+    prompt.push_str("- **Use `project_map` first** to understand structure, then read only entry points.\n");
+    prompt.push_str("- **Use `symbol_search` or `grep`** to find specific code patterns instead of reading entire files.\n");
+    prompt.push_str("- **If you must read files**, prioritize: main > lib > mod > implementation files.\n");
+    prompt.push_str("- **DO NOT re-read files** you've already read. The system will remind you which files were read.\n");
+    prompt.push_str("- **Summarize as you go**: After reading a file, note its purpose and key functions in your thinking.\n\n");
 
     // ── 安全约束 ──
     prompt.push_str("[Safety]\n");
@@ -218,6 +227,7 @@ pub async fn execute_turn(
             prompt_cache: false,
             max_output_tokens,
         },
+        compaction_ratio: crate::config::OrionConfig::load_cached().agent.compaction_ratio,
     };
     
     let outcome = run_simple_loop(

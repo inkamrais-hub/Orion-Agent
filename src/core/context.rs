@@ -2,7 +2,17 @@ use crate::core::TokenCount;
 use crate::core::provider::Message;
 
 /// ToolResult 截断长度 (可通过环境变量 ORION_TRUNCATE_LEN 覆盖)
-const TRUNCATE_LEN: usize = 200;
+/// 增加到 500 以便压缩摘要保留更多文件内容信息
+const TRUNCATE_LEN: usize = 500;
+
+/// 安全截断 UTF-8 字符串，不会在多字节字符中间截断
+fn safe_truncate(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len { return s; }
+    match s.char_indices().nth(max_len) {
+        Some((idx, _)) => &s[..idx],
+        None => s, // 字符数不足 max_len
+    }
+}
 
 // ============================================================
 //  积木: Context (上下文管理 + 压缩策略)
@@ -242,7 +252,9 @@ pub async fn compact_context_with_llm(
             let conversation = extract_conversation_text(messages);
             let prompt = format!(
                 "Summarize the following conversation in under {} tokens. \
-                 Preserve all key decisions, file paths, and technical details:\n\n{}",
+                 CRITICAL: Preserve ALL file paths that were read or mentioned. \
+                 Preserve all key decisions, code patterns, and technical details. \
+                 List files that were read with a one-line summary of each:\n\n{}",
                 summary_target_tokens, conversation
             );
             if let Some(summary) = call_llm_summary(provider, model, &prompt).await {
@@ -422,7 +434,7 @@ fn extract_conversation_text(messages: &[Message]) -> String {
         // 提取 reasoning_content
         if let Some(ref reasoning) = msg.reasoning_content {
             if !reasoning.is_empty() {
-                parts.push(format!("[{} Thinking]: {}", role, &reasoning[..reasoning.len().min(TRUNCATE_LEN)]));
+                parts.push(format!("[{} Thinking]: {}", role, safe_truncate(reasoning, TRUNCATE_LEN)));
             }
         }
         for block in &msg.content {
@@ -433,10 +445,10 @@ fn extract_conversation_text(messages: &[Message]) -> String {
                 }
                 ContentBlock::ToolResult { tool_name, content, is_error, .. } => {
                     let prefix = if *is_error { "ERROR" } else { "OK" };
-                    parts.push(format!("[{}]: Tool result [{}] {}: {}", role, prefix, tool_name, &content[..content.len().min(TRUNCATE_LEN)]));
+                    parts.push(format!("[{}]: Tool result [{}] {}: {}", role, prefix, tool_name, safe_truncate(content, TRUNCATE_LEN)));
                 }
                 ContentBlock::Thinking { text } => {
-                    parts.push(format!("[{} Thinking]: {}", role, &text[..text.len().min(TRUNCATE_LEN)]));
+                    parts.push(format!("[{} Thinking]: {}", role, safe_truncate(text, TRUNCATE_LEN)));
                 }
                 _ => {}
             }

@@ -194,11 +194,23 @@ pub struct AgentLoopConfig {
     pub max_turns: u64,
     pub max_tool_calls: u64,
     pub token_budget: u64,
+    /// 压缩触发比例 (0.0-1.0)，当 token 使用量超过 context_window * compaction_ratio 时触发压缩
+    #[serde(default = "default_compaction_ratio")]
+    pub compaction_ratio: f64,
+}
+
+fn default_compaction_ratio() -> f64 {
+    0.80
 }
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
-        Self { max_turns: 50, max_tool_calls: 30, token_budget: 128_000 }
+        Self {
+            max_turns: 50,
+            max_tool_calls: 30,
+            token_budget: 128_000,
+            compaction_ratio: default_compaction_ratio(),
+        }
     }
 }
 

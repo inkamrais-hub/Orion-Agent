@@ -216,6 +216,7 @@ pub async fn run_task_once(
             prompt_cache: model_config.prompt_cache,
             max_output_tokens: model_config.max_tokens.unwrap_or(4096),
         },
+        compaction_ratio: config.agent.compaction_ratio,
     };
 
     let outcome = crate::core::r#loop::run_simple_loop(

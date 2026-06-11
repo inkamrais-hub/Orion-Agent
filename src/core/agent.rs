@@ -296,6 +296,7 @@ impl Agent {
                 prompt_cache: false,
                 max_output_tokens: resolve_max_output_tokens(&self.config.reasoning_effort),
             },
+            compaction_ratio: crate::config::OrionConfig::load_cached().agent.compaction_ratio,
         }
     }
 
@@ -379,6 +380,7 @@ impl Agent {
                     prompt_cache: false,
                     max_output_tokens: resolve_max_output_tokens(&reasoning_effort),
                 },
+                compaction_ratio: crate::config::OrionConfig::load_cached().agent.compaction_ratio,
             };
 
             let event_tx = tx.clone();
