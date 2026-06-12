@@ -267,6 +267,38 @@ impl ToolRegistry {
             }
         }
 
+        // ── 前置拦截器：全局 DryRun 模式覆盖 ──
+        if ctx.execution_mode == crate::tools::ExecutionMode::DryRun {
+            match name {
+                "edit" => {
+                    // EditTool 原生支持 dry_run 参数
+                    input["dry_run"] = Value::Bool(true);
+                }
+                "write" => {
+                    // WriteTool 没有 dry_run，registry 层直接拦截
+                    let path = input["path"].as_str().unwrap_or("?");
+                    let content = input["content"].as_str().unwrap_or("");
+                    let preview: String = content.chars().take(200).collect();
+                    let truncated = content.len() > 200;
+                    return Ok(ToolResult {
+                        content: format!(
+                            "[DRY RUN] Would write {} bytes to {}\n\nPreview:\n{}{}",
+                            content.len(), path,
+                            preview,
+                            if truncated { "..." } else { "" }
+                        ),
+                        is_error: false,
+                        metadata: Some(serde_json::json!({
+                            "dry_run": true,
+                            "path": path,
+                            "bytes": content.len(),
+                        })),
+                    });
+                }
+                _ => {}
+            }
+        }
+
         // ── 前置拦截器：文件修改前读取快照 ──
         let snapshot_state = self.pre_execute_snapshot(name, &input).await;
 
