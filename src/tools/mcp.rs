@@ -189,11 +189,23 @@ pub async fn connect_mcp_server(
     };
 
     // 2. 注册代理工具（复用池中的 request_tx）
+    let tool_names: Vec<String> = pooled.tool_defs.iter().map(|d| d.name.clone()).collect();
     for def in &pooled.tool_defs {
         let proxy = McpToolProxy::new(def.clone(), pooled.request_tx.clone());
         registry.register(proxy);
     }
 
-    tracing::info!(server = %config.name, tools = pooled.tool_defs.len(), "MCP tools registered (pooled)");
+    // 3. 为该 MCP server 创建动态聚类，使 sub-agent 可按聚类授权
+    let sanitized: String = config.name.chars().map(|c| {
+        if c.is_alphanumeric() || c == '_' { c } else { '_' }
+    }).collect();
+    let cluster_name = format!("mcp_{}", sanitized);
+    let brief = format!(
+        "{} tool(s) from MCP server '{}'",
+        tool_names.len(), config.name
+    );
+    registry.register_dynamic_cluster(&cluster_name, tool_names, &brief);
+
+    tracing::info!(server = %config.name, cluster = %cluster_name, tools = pooled.tool_defs.len(), "MCP tools registered (pooled)");
     Ok(())
 }

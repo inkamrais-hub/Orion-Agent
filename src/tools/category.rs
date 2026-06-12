@@ -93,7 +93,7 @@ impl ClusterRegistry {
     pub fn sys_prompt_all(&self) -> String {
         let mut prompt = String::new();
         // 按固定顺序输出，保证 prompt 稳定性（有利于 cache 命中）
-        let order = ["file_ops", "search", "code_intel", "command", "snapshot", "communication", "sub_agent"];
+        let order = ["file_ops", "search", "code_overview", "code_analysis", "command", "snapshot", "communication", "sub_agent"];
         for name in &order {
             if let Some(cluster) = self.clusters.get(*name) {
                 prompt.push_str(&cluster.sys_prompt_fragment);
@@ -172,20 +172,29 @@ pub fn create_default_clusters() -> ClusterRegistry {
 
     reg.register(ToolCluster {
         meta: ClusterMeta {
-            name: "code_intel".into(),
-            display_name: "代码智能".into(),
-            brief: "symbol_search/find_callers/project_map/skeleton — 代码分析".into(),
-            tool_names: vec![
-                "symbol_search".into(), "find_callers".into(),
-                "project_map".into(), "skeleton".into(),
-            ],
+            name: "code_overview".into(),
+            display_name: "代码概览".into(),
+            brief: "project_map/skeleton — 查看项目结构和文件骨架".into(),
+            tool_names: vec!["project_map".into(), "skeleton".into()],
         },
-        sys_prompt_fragment: "[code_intel] symbol_search/find_callers/project_map/skeleton\n\
-            symbol_search: Search functions/classes/variables by name across the codebase.\n\
-            find_callers: Find who calls a specific function (call graph analysis).\n\
+        sys_prompt_fragment: "[code_overview] project_map/skeleton\n\
             project_map: Generate project structure overview (file count, languages, key symbols).\n\
             skeleton: Show the structural outline of a file (functions, classes, imports).\n\
-            Rule: Use these to understand code architecture before making changes."
+            Rule: Use these first to understand the lay of the land before diving into details."
+            .into(),
+    });
+
+    reg.register(ToolCluster {
+        meta: ClusterMeta {
+            name: "code_analysis".into(),
+            display_name: "代码分析".into(),
+            brief: "symbol_search/find_callers — 符号搜索和调用图分析".into(),
+            tool_names: vec!["symbol_search".into(), "find_callers".into()],
+        },
+        sys_prompt_fragment: "[code_analysis] symbol_search/find_callers\n\
+            symbol_search: Search functions/classes/variables by name across the codebase.\n\
+            find_callers: Find who calls a specific function (call graph analysis).\n\
+            Rule: Use these for deep code understanding — tracing dependencies and call chains."
             .into(),
     });
 
@@ -259,10 +268,12 @@ mod tests {
     #[test]
     fn test_cluster_registry() {
         let reg = create_default_clusters();
-        assert_eq!(reg.len(), 7);
+        assert_eq!(reg.len(), 8);
         assert!(reg.get("file_ops").is_some());
         assert!(reg.get("search").is_some());
         assert!(reg.get("sub_agent").is_some());
+        assert!(reg.get("code_overview").is_some());
+        assert!(reg.get("code_analysis").is_some());
     }
 
     #[test]
@@ -271,7 +282,9 @@ mod tests {
         assert_eq!(reg.cluster_of("read"), Some("file_ops"));
         assert_eq!(reg.cluster_of("bash"), Some("command"));
         assert_eq!(reg.cluster_of("grep"), Some("search"));
-        assert_eq!(reg.cluster_of("symbol_search"), Some("code_intel"));
+        assert_eq!(reg.cluster_of("symbol_search"), Some("code_analysis"));
+        assert_eq!(reg.cluster_of("project_map"), Some("code_overview"));
+        assert_eq!(reg.cluster_of("skeleton"), Some("code_overview"));
         assert_eq!(reg.cluster_of("snapshot_history"), Some("snapshot"));
         assert_eq!(reg.cluster_of("ask_user"), Some("communication"));
         assert_eq!(reg.cluster_of("create_sub_agent"), Some("sub_agent"));

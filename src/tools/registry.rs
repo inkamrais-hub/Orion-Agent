@@ -88,6 +88,27 @@ impl ToolRegistry {
         self.allowed_clusters = Some(clusters);
     }
 
+    /// 为动态工具注册聚类（MCP 等）
+    ///
+    /// 每次 MCP server 连接后调用，自动为该 server 的工具创建一个聚类。
+    /// 聚类名建议使用 `mcp_{server_name}` 格式，保证唯一性。
+    pub fn register_dynamic_cluster(&mut self, cluster_name: &str, tool_names: Vec<String>, brief: &str) {
+        if let Some(ref mut clusters) = self.clusters {
+            clusters.register(crate::tools::category::ToolCluster {
+                meta: crate::tools::category::ClusterMeta {
+                    name: cluster_name.to_string(),
+                    display_name: format!("MCP: {}", cluster_name),
+                    brief: brief.to_string(),
+                    tool_names,
+                },
+                sys_prompt_fragment: format!(
+                    "[{}] Dynamic MCP tools from server '{}'.\n",
+                    cluster_name, cluster_name
+                ),
+            });
+        }
+    }
+
     /// 是否处于延迟装载模式
     pub fn is_lazy_mode(&self) -> bool {
         self.lazy_mode
@@ -134,7 +155,8 @@ impl ToolRegistry {
             (Some(allowed), Some(clusters)) => {
                 match clusters.cluster_of(name) {
                     Some(cluster_name) => allowed.contains(cluster_name),
-                    // MCP 动态工具和元工具不受聚类限制
+                    // 元工具（load_tool / list_categories）不受聚类限制；
+                    // MCP 动态工具已通过 register_dynamic_cluster 注册聚类，不再走此分支。
                     None => true,
                 }
             }
@@ -147,7 +169,7 @@ impl ToolRegistry {
     /// 过滤逻辑:
     ///   1. 延迟模式 → 只返回已激活的工具
     ///   2. 聚类限制 → 只返回属于允许聚类的工具
-    ///   3. 元工具和 MCP 工具不受聚类限制
+    ///   3. 元工具不受聚类限制；MCP 工具通过动态聚类受控
     pub fn definitions(&self) -> Vec<Value> {
         self.tools
             .values()
@@ -245,56 +267,15 @@ impl ToolRegistry {
             }
         }
 
-        // ── 前置拦截器：文件快照备份（write/edit 工具） ──
-        let snapshot_path = if name == "write" || name == "edit" {
-            input["path"].as_str().map(|s| s.to_string())
-        } else {
-            None
-        };
-        let content_before = if let Some(ref path_str) = snapshot_path {
-            tokio::fs::read_to_string(path_str).await.ok()
-        } else {
-            None
-        };
+        // ── 前置拦截器：文件修改前读取快照 ──
+        let snapshot_state = self.pre_execute_snapshot(name, &input).await;
 
         // ── 执行原始的工具 ──
         let result = tool.execute(input, ctx).await?;
 
-        // ── 后置拦截器：保存快照到 SQLite ──
-        if (name == "write" || name == "edit") && !result.is_error {
-            if let Some(ref path_str) = snapshot_path {
-                save_file_snapshot(ctx, name, path_str, content_before.as_deref(), self.store.as_deref()).await;
-
-                // ── 行级快照: 调用 SnapshotStore.create_snapshot() ──
-                if let Ok(content_after) = tokio::fs::read_to_string(path_str).await {
-                    let workspace = std::env::current_dir().unwrap_or_default();
-                    let mut snapshot_store = crate::tools::code_intelligence::file_snapshot::SnapshotStore::new(&workspace);
-                    let _ = snapshot_store.init();
-                    let _ = snapshot_store.load_from_disk();
-                    let old_content = content_before.as_deref().unwrap_or("");
-                    let snapshot_result = snapshot_store.create_snapshot(
-                        path_str,
-                        old_content,
-                        &content_after,
-                        &ctx.session_id,
-                        &ctx.agent_id,
-                        Some(format!("{} tool operation", name)),
-                    );
-                    match snapshot_result {
-                        crate::tools::code_intelligence::file_snapshot::SnapshotResult::RiskyChange(entry) => {
-                            tracing::warn!(
-                                file = %path_str,
-                                ratio = %format!("{:.0}%", entry.change_ratio * 100.0),
-                                "Risky file change detected (>80% lines changed)"
-                            );
-                        }
-                        crate::tools::code_intelligence::file_snapshot::SnapshotResult::Created(_) => {
-                            tracing::debug!(file = %path_str, "File snapshot created");
-                        }
-                        crate::tools::code_intelligence::file_snapshot::SnapshotResult::SkippedUnchanged => {}
-                    }
-                }
-            }
+        // ── 后置拦截器：文件修改后保存快照 ──
+        if !result.is_error {
+            self.post_execute_snapshot(name, ctx, &snapshot_state).await;
         }
 
         Ok(result)
@@ -314,6 +295,63 @@ impl ToolRegistry {
         cloned.set_allowed_clusters(allowed.into_iter().collect());
         cloned
     }
+
+    // ── 快照切面（从 execute() 解耦） ──
+
+    /// 前置：文件修改前读取内容备份
+    async fn pre_execute_snapshot(&self, name: &str, input: &Value) -> Option<SnapshotState> {
+        if name != "write" && name != "edit" {
+            return None;
+        }
+        let path = input["path"].as_str()?.to_string();
+        let content_before = tokio::fs::read_to_string(&path).await.ok();
+        Some(SnapshotState { path, content_before })
+    }
+
+    /// 后置：文件修改后保存快照（SQLite + 行级）
+    async fn post_execute_snapshot(&self, name: &str, ctx: &ToolContext, state: &Option<SnapshotState>) {
+        let Some(state) = state else { return };
+        if name != "write" && name != "edit" { return; }
+
+        // SQLite 快照
+        save_file_snapshot(ctx, name, &state.path, state.content_before.as_deref(), self.store.as_deref()).await;
+
+        // 行级快照
+        if let Ok(content_after) = tokio::fs::read_to_string(&state.path).await {
+            let workspace = std::env::current_dir().unwrap_or_default();
+            let mut snapshot_store = crate::tools::code_intelligence::file_snapshot::SnapshotStore::new(&workspace);
+            let _ = snapshot_store.init();
+            let _ = snapshot_store.load_from_disk();
+            let old_content = state.content_before.as_deref().unwrap_or("");
+            let snapshot_result = snapshot_store.create_snapshot(
+                &state.path,
+                old_content,
+                &content_after,
+                &ctx.session_id,
+                &ctx.agent_id,
+                Some(format!("{} tool operation", name)),
+            );
+            match snapshot_result {
+                crate::tools::code_intelligence::file_snapshot::SnapshotResult::RiskyChange(entry) => {
+                    tracing::warn!(
+                        file = %state.path,
+                        ratio = %format!("{:.0}%", entry.change_ratio * 100.0),
+                        "Risky file change detected (>80% lines changed)"
+                    );
+                }
+                crate::tools::code_intelligence::file_snapshot::SnapshotResult::Created(_) => {
+                    tracing::debug!(file = %state.path, "File snapshot created");
+                }
+                crate::tools::code_intelligence::file_snapshot::SnapshotResult::SkippedUnchanged => {}
+            }
+        }
+    }
+}
+
+/// 快照状态（前置读取 → 后置比较）
+struct SnapshotState {
+    path: String,
+    content_before: Option<String>,
 }
 
 // ============================================================
@@ -321,21 +359,61 @@ impl ToolRegistry {
 // ============================================================
 
 /// 路径规范化与安全校验
+///
+/// 1. 如果路径存在 → canonicalize 直接解析（处理 symlink、.. 等）
+/// 2. 如果路径不存在 → 手动规范化，保留 Prefix/RootDir（防止 Windows 驱动号丢失）
+/// 3. 绝对路径必须在工作区范围内
+/// 4. 相对路径不能逃逸（.. 开头）
 fn normalize_and_validate_path(path_str: &str, working_dir: &str) -> crate::Result<String> {
     let path = Path::new(path_str);
 
+    // 1. 路径存在 → 用 canonicalize（最可靠）
+    if let Ok(canonical) = path.canonicalize() {
+        let normalized = canonical.to_string_lossy().replace('\\', "/");
+        // canonicalize 后的绝对路径做逃逸检查
+        let work_canonical = PathBuf::from(working_dir)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(working_dir));
+        let work_str = work_canonical.to_string_lossy().to_lowercase().replace('\\', "/");
+        if !normalized.to_lowercase().starts_with(&work_str) {
+            return Err(crate::Error::Tool(format!(
+                "安全拦截: 路径 '{}' 超出工作区范围 (working_dir: {})",
+                path_str, working_dir
+            )));
+        }
+        return Ok(normalized);
+    }
+
+    // 2. 路径不存在 → 手动规范化，保留系统组件
+    let mut prefix = String::new();
     let mut components = Vec::new();
     for comp in path.components() {
         match comp {
+            Component::Prefix(p) => {
+                // Windows 驱动号前缀 (C:, D: 等) — 必须保留
+                prefix = p.as_os_str().to_string_lossy().to_string();
+            }
+            Component::RootDir => {
+                // 根目录分隔符 — 保留
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                } else {
+                    prefix = "/".to_string();
+                }
+            }
             Component::Normal(s) => components.push(s.to_string_lossy().to_string()),
             Component::ParentDir => { components.pop(); }
             Component::CurDir => {}
-            _ => {}
         }
     }
 
-    let normalized = components.join("/");
+    let normalized = if prefix.is_empty() {
+        components.join("/")
+    } else {
+        format!("{}{}", prefix, components.join("/"))
+    };
 
+    // 3. 绝对路径逃逸检查
     if path.is_absolute() {
         let work = PathBuf::from(working_dir);
         let work_str = work.to_string_lossy().to_lowercase().replace('\\', "/");
@@ -348,6 +426,7 @@ fn normalize_and_validate_path(path_str: &str, working_dir: &str) -> crate::Resu
         }
     }
 
+    // 4. 相对路径不能逃逸
     if !path.is_absolute() && normalized.starts_with("..") {
         return Err(crate::Error::Tool(format!(
             "安全拦截: 路径 '{}' 规范化后逃逸出工作区范围",

@@ -33,6 +33,23 @@ pub struct ToolResult {
     pub metadata: Option<Value>,
 }
 
+/// 工具暴露级别
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ToolExposure {
+    /// 直接给 LLM (默认)
+    Direct,
+    /// LLM 需要时才加载 (通过 load_tool)
+    Deferred,
+    /// 只给 LLM 看，用户看不到
+    DirectModelOnly,
+    /// 隐藏，内部用 (子 Agent)
+    Hidden,
+}
+
+impl Default for ToolExposure {
+    fn default() -> Self { Self::Direct }
+}
+
 /// Tool trait — 实现此 trait 可注册为工具
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -44,6 +61,29 @@ pub trait Tool: Send + Sync {
 
     /// 执行工具
     async fn execute(&self, input: Value, ctx: &ToolContext) -> crate::Result<ToolResult>;
+
+    // ── 可选元数据（有默认值，按需覆写） ──
+
+    /// 暴露级别 — 控制工具对 LLM 的可见性
+    fn exposure(&self) -> ToolExposure { ToolExposure::Direct }
+
+    /// 搜索提示（Deferred 工具用，帮助用户按关键词找到工具）
+    fn search_hint(&self) -> Option<&str> { None }
+
+    /// 是否支持并行调用
+    fn supports_parallel(&self) -> bool { false }
+
+    /// 生成 ToolSpec（从 trait 方法自动派生，保证 schema 一致性）
+    fn to_spec(&self) -> spec::ToolSpec {
+        spec::ToolSpec {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            exposure: self.exposure(),
+            input_schema: self.input_schema(),
+            supports_parallel: self.supports_parallel(),
+            search_hint: self.search_hint().map(|s| s.to_string()),
+        }
+    }
 }
 
 /// 工具执行上下文
@@ -54,6 +94,27 @@ pub struct ToolContext {
     pub turn_number: u64,
     pub agent_id: String,
     pub registry: Option<std::sync::Arc<crate::agent::registry::AgentRegistry>>,
+    /// 当前节点 ID（节点系统用，可选）
+    pub node_id: Option<String>,
+    /// 上游节点传来的数据（节点系统用，可选）
+    pub upstream_data: Option<Value>,
+    /// 执行模式
+    pub execution_mode: ExecutionMode,
+}
+
+/// 执行模式
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionMode {
+    /// 正常自动执行
+    Auto,
+    /// 需要用户确认后才执行
+    Confirm,
+    /// 干运行 — 只预览不写入
+    DryRun,
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self { Self::Auto }
 }
 
 // ============================================================
@@ -140,20 +201,23 @@ impl Tool for ReadTool {
         let limit = input["limit"].as_u64().map(|v| v.max(1) as usize);
 
         let content = if file_size > READ_MAX_BYTES && offset.is_none() && limit.is_none() {
-            // 大文件: 只读前部分 + 提示
-            let raw = tokio::fs::read_to_string(path).await?;
-            let truncated = if raw.len() > READ_MAX_BYTES as usize {
+            // 大文件: 流式读取，只取前 READ_MAX_BYTES 字节
+            use tokio::io::AsyncReadExt;
+            let file = tokio::fs::File::open(path).await?;
+            let mut reader = tokio::io::BufReader::new(file).take(READ_MAX_BYTES);
+            let mut buf = String::new();
+            reader.read_to_string(&mut buf).await?;
+            // 确保不在 char boundary 中间截断
+            let truncated = if buf.len() >= READ_MAX_BYTES as usize {
                 let mut end = READ_MAX_BYTES as usize;
-                while end > 0 && !raw.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}...[truncated, showing {}/{} bytes]", &raw[..end], end, raw.len())
+                while end > 0 && !buf.is_char_boundary(end) { end -= 1; }
+                format!("{}...[truncated, showing {}/{} bytes]", &buf[..end], end, file_size)
             } else {
-                raw.clone()
+                buf.clone()
             };
-            let total_lines = raw.lines().count();
-            format!("{}\n\n[File truncated: {} bytes, {} total lines. Use offset/limit to read specific sections.]",
-                truncated, file_size, total_lines)
+            let total_lines_estimate = file_size / 80; // rough estimate
+            format!("{}\n\n[File truncated: {} bytes, ~{} total lines. Use offset/limit to read specific sections.]",
+                truncated, file_size, total_lines_estimate)
         } else {
             let raw = tokio::fs::read_to_string(path).await?;
             match (offset, limit) {
@@ -239,7 +303,8 @@ impl Tool for WriteTool {
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
-                "content": { "type": "string" }
+                "content": { "type": "string" },
+                "create_only": { "type": "boolean", "description": "If true, fail if file already exists (prevents accidental overwrite)" }
             },
             "required": ["path", "content"]
         })
@@ -251,6 +316,14 @@ impl Tool for WriteTool {
         let content = input["content"].as_str().ok_or_else(|| {
             crate::Error::Tool("missing 'content' field".into())
         })?;
+        let create_only = input["create_only"].as_bool().unwrap_or(false);
+        if create_only && tokio::fs::metadata(path).await.is_ok() {
+            return Ok(ToolResult {
+                content: format!("File '{}' already exists and create_only=true. Aborting to prevent overwrite.", path),
+                is_error: true,
+                metadata: None,
+            });
+        }
 
         // 工作区安全检查
         if let Err(e) = crate::core::workspace::can_write_file(std::path::Path::new(path)).await {
@@ -460,15 +533,18 @@ impl Tool for BashTool {
             }),
         };
 
-        let mut content = if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).to_string()
-        } else {
-            format!(
+        let mut content = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.stderr.is_empty() {
+            if !content.is_empty() { content.push_str("\n--- stderr ---\n"); }
+            content.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+        if !output.status.success() {
+            content = format!(
                 "Exit code: {}\n{}",
                 output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr)
-            )
-        };
+                content
+            );
+        }
 
         // 截断过长输出
         if content.len() > BASH_MAX_OUTPUT_BYTES {

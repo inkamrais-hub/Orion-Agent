@@ -263,6 +263,9 @@ impl ToolExecutor {
                 turn_number,
                 agent_id: config.agent_id.clone(),
                 registry: config.registry.clone(),
+                node_id: None,
+                upstream_data: None,
+                execution_mode: Default::default(),
             };
             match tools.execute(tool_name, input.clone(), &tool_ctx).await {
                 Ok(res) => {
@@ -510,6 +513,9 @@ impl ToolExecutor {
             turn_number: self.config.turn_number.unwrap_or(0),
             agent_id: self.config.agent_id.clone(),
             registry: self.config.registry.clone(),
+            node_id: None,
+            upstream_data: None,
+            execution_mode: Default::default(),
         };
 
         let result = match self

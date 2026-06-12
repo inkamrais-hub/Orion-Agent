@@ -47,7 +47,8 @@ impl Tool for GrepTool {
                 "max_results": {"type": "integer", "description": "Max results to return (default: 30)"},
                 "context_lines": {"type": "integer", "description": "Number of lines to show before/after each match, like grep -C (default: 0)"},
                 "ignore_case": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
-                "count_only": {"type": "boolean", "description": "Only return match counts per file, not the actual lines (default: false)"}
+                "count_only": {"type": "boolean", "description": "Only return match counts per file, not the actual lines (default: false)"},
+                "output_format": { "type": "string", "description": "Output format: 'text' (default) or 'json' (structured)" }
             },
             "required": ["pattern"]
         })
@@ -69,6 +70,7 @@ impl Tool for GrepTool {
         let context_lines = input["context_lines"].as_u64().unwrap_or(0) as usize;
         let ignore_case = input["ignore_case"].as_bool().unwrap_or(false);
         let count_only = input["count_only"].as_bool().unwrap_or(false);
+        let output_json = input["output_format"].as_str() == Some("json");
 
         // 构建 regex (可选忽略大小写)
         let re = if ignore_case {
@@ -135,6 +137,26 @@ impl Tool for GrepTool {
                 }
             }
             if match_count >= max_results { break; }
+        }
+
+        if output_json {
+            let json_results: Vec<Value> = file_results.iter().map(|fr| {
+                let rel = fr.path.strip_prefix(root).unwrap_or(&fr.path);
+                json!({
+                    "file": rel.display().to_string(),
+                    "matches": fr.matches.iter().map(|m| json!({
+                        "line": m.line_num,
+                        "text": m.matched_line.trim(),
+                        "context_before": m.context_before.iter().map(|c| json!({"line": c.line_num, "text": c.text.trim()})).collect::<Vec<_>>(),
+                        "context_after": m.context_after.iter().map(|c| json!({"line": c.line_num, "text": c.text.trim()})).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                })
+            }).collect();
+            return Ok(ToolResult {
+                content: serde_json::to_string_pretty(&json_results).unwrap_or_default(),
+                is_error: false,
+                metadata: Some(json!({"matches": match_count, "files": file_results.len(), "format": "json"})),
+            });
         }
 
         Ok(ToolResult {

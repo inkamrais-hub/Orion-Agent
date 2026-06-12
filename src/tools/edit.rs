@@ -24,7 +24,8 @@ impl Tool for EditTool {
                 "old_string": { "type": "string", "description": "Exact text to find and replace (must be unique in file)" },
                 "new_string": { "type": "string", "description": "Replacement text" },
                 "replace_all": { "type": "boolean", "description": "Replace all occurrences (default: false)" },
-                "expected_replacements": { "type": "integer", "description": "Expected number of replacements. Error if actual count differs (optional, for safety)" }
+                "expected_replacements": { "type": "integer", "description": "Expected number of replacements. Error if actual count differs (optional, for safety)" },
+                "dry_run": { "type": "boolean", "description": "If true, show what would change without actually writing (preview mode)" }
             },
             "required": ["path", "old_string", "new_string"]
         })
@@ -42,6 +43,7 @@ impl Tool for EditTool {
         })?;
         let replace_all = input["replace_all"].as_bool().unwrap_or(false);
         let expected = input["expected_replacements"].as_u64().map(|v| v as usize);
+        let dry_run = input["dry_run"].as_bool().unwrap_or(false);
 
         // 工作区安全检查
         if let Err(e) = crate::core::workspace::can_write_file(std::path::Path::new(path)).await {
@@ -131,6 +133,24 @@ impl Tool for EditTool {
         } else {
             new_content
         };
+
+        if dry_run {
+            let diff_preview = format!(
+                "--- {}\n+++ {}\n@@ replacement(s): {} @@\n- {}\n+ {}",
+                path, path, actual_replacements,
+                truncate_preview(old_string),
+                truncate_preview(new_string),
+            );
+            return Ok(ToolResult {
+                content: format!("[DRY RUN] Would make {} replacement(s) in {}\n\n{}", actual_replacements, path, diff_preview),
+                is_error: false,
+                metadata: Some(serde_json::json!({
+                    "dry_run": true,
+                    "path": path,
+                    "replacements": actual_replacements,
+                })),
+            });
+        }
 
         // 写回文件
         tokio::fs::write(path, &final_content).await
